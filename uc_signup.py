@@ -567,6 +567,8 @@ class SignupBot:
             titleLower = str(self.d.title or "").lower()
             textLower = self.page_text().lower()
 
+            if self.has_profile_inputs() or "about-you" in urlLower or "how old are you" in titleLower:
+                return "profile"
             if self.d.find_elements(By.CSS_SELECTOR, "input[name=new-password], input[autocomplete='new-password']"):
                 return "password"
             if (
@@ -578,8 +580,6 @@ class SignupBot:
                 return "email-code"
             if self.needs_phone_verification():
                 return "phone"
-            if self.has_profile_inputs():
-                return "profile"
             time.sleep(1)
         raise FatalError(
             f"邮箱提交后页面未知: url={last_url[:180]} title={self.d.title} text={self.page_text()[:220]}"
@@ -602,11 +602,15 @@ class SignupBot:
     def has_code_input(self):
         return bool(self.d.find_elements(
             By.CSS_SELECTOR,
-            "input[name=code], input[autocomplete='one-time-code'], input[inputmode=numeric]",
+            "input[name=code], input[autocomplete='one-time-code'], input[name=otp]",
         ))
 
     def has_profile_inputs(self):
-        return bool(self.d.find_elements(By.CSS_SELECTOR, "input[name=name], input[name=age]"))
+        if self.d.find_elements(By.CSS_SELECTOR, "input[name=name], input[name=age], input[name=birthday], input[autocomplete='name']"):
+            return True
+        titleLower = str(self.d.title or "").lower()
+        textLower = self.page_text().lower()
+        return "how old are you" in titleLower or "full name" in textLower or "about-you" in self.d.current_url.lower()
 
     def needs_phone_verification(self):
         urlLower = self.d.current_url.lower()
@@ -652,11 +656,35 @@ class SignupBot:
         time.sleep(4)
 
     def fill_profile(self):
-        self._step("姓名年龄", lambda: (
-            self.fill("input[name=name]", NAME),
-            self.fill("input[name=age]", AGE),
-            self.click("Finish creating account")
-        ))
+        def _fill():
+            nameFilled = False
+            for sel in ("input[name=name]", "input[autocomplete='name']", "input[placeholder*='name' i]"):
+                try:
+                    self.fill(sel, NAME)
+                    nameFilled = True
+                    break
+                except StepError:
+                    continue
+            if not nameFilled:
+                self.fill_any(["input[type=text]"], NAME)
+
+            ageFilled = False
+            for sel in ("input[name=age]", "input[name=birthday]", "input[autocomplete='bday']", "input[placeholder*='age' i]"):
+                try:
+                    self.fill(sel, AGE)
+                    ageFilled = True
+                    break
+                except StepError:
+                    continue
+            if not ageFilled:
+                self.fill_any(["input[type=number]", "input[inputmode=numeric]"], AGE)
+
+            if self._find_button("Finish creating account"):
+                self.click("Finish creating account")
+            else:
+                self.click("Continue")
+
+        self._step("姓名年龄", _fill)
         time.sleep(8)
         log(f"✅ 注册完成: {self.d.title}")
 
@@ -740,19 +768,22 @@ class SignupBot:
         if stage == "phone":
             self.handle_forced_phone()
             stage = self.wait_after_email_submit()
+            log(f"→ 手机后阶段: {stage} | {self.d.title}")
         if stage == "profile":
             self.fill_profile()
             return self.phone, self.fullPhone
-        if stage != "password":
-            self.wait_password_page()
-
-        log(f"→ {self.d.title}")
-        self._step("填密码", lambda: (
-            self.fill("input[name=new-password]", PW),
-            self.click("Continue"),
-        ))
-        afterPassword = self.wait_after_password()
-        log(f"→ {self.d.title} ({afterPassword})")
+        if stage == "password":
+            log(f"→ {self.d.title}")
+            self._step("填密码", lambda: (
+                self.fill("input[name=new-password]", PW),
+                self.click("Continue"),
+            ))
+            afterPassword = self.wait_after_password()
+            log(f"→ {self.d.title} ({afterPassword})")
+        else:
+            raise FatalError(
+                f"邮箱流程未知阶段: {stage} url={self.d.current_url[:180]} title={self.d.title}"
+            )
 
         for _ in range(6):
             if self.has_profile_inputs():
@@ -767,7 +798,6 @@ class SignupBot:
                 self.submit_verification_code(email)
                 continue
 
-            # Some flows land on about-you without obvious inputs yet.
             if "about-you" in self.d.current_url.lower():
                 time.sleep(2)
                 if self.has_profile_inputs():
