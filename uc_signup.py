@@ -194,34 +194,36 @@ class SignupBot:
             return ""
 
     def wait_after_password(self, timeout=45):
-        """密码提交后等待进入验证页；若密码规则不通过则立即失败。"""
+        """密码提交后等待离开创建密码页；超时仍停在密码页则判定失败。"""
         deadline = time.time() + timeout
         last_url = ""
         while time.time() < deadline:
             self.wait_ready(timeout=2)
             last_url = self.d.current_url
             urlLower = last_url.lower()
-            textLower = self.page_text().lower()
 
-            if any(k in textLower for k in (
-                "at least 12 characters",
-                "must contain",
-                "password must",
-                "too short",
-                "密码至少",
-                "密码必须",
-            )) and self.d.find_elements(By.CSS_SELECTOR, "input[name=new-password], input[autocomplete='new-password']"):
-                raise FatalError(f"密码不符合 OpenAI 规则（通常需至少12位）: title={self.d.title} url={last_url[:160]}")
-
+            leftPasswordPage = "create-account/password" not in urlLower and not self.d.find_elements(
+                By.CSS_SELECTOR, "input[name=new-password], input[autocomplete='new-password']"
+            )
             if any(k in urlLower for k in (
                 "contact-verification",
                 "phone-verification",
                 "email-verification",
-                "verify",
-                "otp",
                 "about-you",
-            )):
-                return "url"
+                "email-otp",
+                "otp",
+            )) or leftPasswordPage:
+                if self.d.find_elements(By.CSS_SELECTOR, "input[name=name], input[name=age]"):
+                    return "profile"
+                if self.d.find_elements(By.CSS_SELECTOR, "input[name=code], input[autocomplete='one-time-code'], input[inputmode=numeric]"):
+                    return "code-input"
+                if leftPasswordPage or any(k in urlLower for k in (
+                    "contact-verification",
+                    "phone-verification",
+                    "email-verification",
+                    "otp",
+                )):
+                    return "url"
 
             if self.d.find_elements(By.CSS_SELECTOR, "input[name=code], input[autocomplete='one-time-code'], input[inputmode=numeric]"):
                 return "code-input"
@@ -230,6 +232,14 @@ class SignupBot:
                 return "profile"
 
             time.sleep(1)
+
+        textLower = self.page_text().lower()
+        if "create-account/password" in last_url.lower() or self.d.find_elements(
+            By.CSS_SELECTOR, "input[name=new-password], input[autocomplete='new-password']"
+        ):
+            raise FatalError(
+                f"密码提交后仍停留在创建密码页（请检查密码规则/网络挑战）: title={self.d.title} url={last_url[:160]} text={textLower[:180]}"
+            )
         raise StepError(f"密码后页面等待超时 | url={last_url[:160]} | title={self.d.title}")
 
     def is_error_page(self):
