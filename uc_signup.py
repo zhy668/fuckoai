@@ -895,8 +895,33 @@ class SignupBot:
         log(f"📧 邮箱注册: {email}")
 
         self.launch()
-        self.d.get(TARGET_URL)
-        time.sleep(12)
+        lastNavError = None
+        for navAttempt in range(1, 4):
+            try:
+                self.d.get(TARGET_URL)
+                time.sleep(12)
+                lastNavError = None
+                break
+            except Exception as e:
+                lastNavError = e
+                msg = str(e)
+                retryable = any(
+                    k in msg
+                    for k in (
+                        "ERR_CONNECTION_CLOSED",
+                        "ERR_CONNECTION_RESET",
+                        "ERR_PROXY_CONNECTION_FAILED",
+                        "ERR_TUNNEL_CONNECTION_FAILED",
+                        "ERR_TIMED_OUT",
+                        "net::ERR_",
+                    )
+                )
+                log(f"  打开注册页失败 ({navAttempt}/3): {msg[:160]}", "warn")
+                if not retryable or navAttempt >= 3:
+                    raise FatalError(f"打开注册页失败: {msg[:220]}") from e
+                time.sleep(5)
+        if lastNavError:
+            raise FatalError(f"打开注册页失败: {str(lastNavError)[:220]}")
         log(f"注册: {self.d.title}")
 
         self._step("Cookie", lambda: self.click_optional("Accept all"))
