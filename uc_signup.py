@@ -185,7 +185,52 @@ class SignupBot:
         for _ in range(timeout):
             if keyword in self.d.current_url: return
             time.sleep(1)
-        raise StepError(f"URL等待超时: {keyword}")
+        raise StepError(f"URL等待超时: {keyword} | url={self.d.current_url[:160]} | title={self.d.title}")
+
+    def page_text(self):
+        try:
+            return str(self.d.execute_script("return document.body ? document.body.innerText : ''") or "")
+        except Exception:
+            return ""
+
+    def wait_after_password(self, timeout=45):
+        """密码提交后等待进入验证页；若密码规则不通过则立即失败。"""
+        deadline = time.time() + timeout
+        last_url = ""
+        while time.time() < deadline:
+            self.wait_ready(timeout=2)
+            last_url = self.d.current_url
+            urlLower = last_url.lower()
+            textLower = self.page_text().lower()
+
+            if any(k in textLower for k in (
+                "at least 12 characters",
+                "must contain",
+                "password must",
+                "too short",
+                "密码至少",
+                "密码必须",
+            )) and self.d.find_elements(By.CSS_SELECTOR, "input[name=new-password], input[autocomplete='new-password']"):
+                raise FatalError(f"密码不符合 OpenAI 规则（通常需至少12位）: title={self.d.title} url={last_url[:160]}")
+
+            if any(k in urlLower for k in (
+                "contact-verification",
+                "phone-verification",
+                "email-verification",
+                "verify",
+                "otp",
+                "about-you",
+            )):
+                return "url"
+
+            if self.d.find_elements(By.CSS_SELECTOR, "input[name=code], input[autocomplete='one-time-code'], input[inputmode=numeric]"):
+                return "code-input"
+
+            if self.d.find_elements(By.CSS_SELECTOR, "input[name=name], input[name=age]"):
+                return "profile"
+
+            time.sleep(1)
+        raise StepError(f"密码后页面等待超时 | url={last_url[:160]} | title={self.d.title}")
 
     def is_error_page(self):
         """检测是否错误页"""
@@ -398,8 +443,19 @@ class SignupBot:
             self.fill("input[name=new-password]", PW),
             self.click("Continue")
         ))
-        self.wait_url_contains("contact-verification")
-        log(f"→ {self.d.title}")
+        afterPassword = self.wait_after_password()
+        log(f"→ {self.d.title} ({afterPassword})")
+
+        if afterPassword == "profile":
+            log("  已跳过验证码页，直接进入资料页")
+            self._step("姓名年龄", lambda: (
+                self.fill("input[name=name]", NAME),
+                self.fill("input[name=age]", AGE),
+                self.click("Finish creating account")
+            ))
+            time.sleep(8)
+            log(f"✅ 注册完成: {self.d.title}")
+            return full_phone
 
         code = self.poll_sms(phone)
         if not code:
@@ -407,7 +463,7 @@ class SignupBot:
         log(f"  SMS: {code}")
 
         self._step("短信验证", lambda: (
-            self.fill("input[name=code]", code),
+            self.fill_any(["input[name=code]", "input[autocomplete='one-time-code']", "input[inputmode=numeric]"], code),
             self.click("Continue")
         ))
         time.sleep(3)
@@ -464,6 +520,8 @@ class SignupBot:
         try:
             if MOCK_MODE:
                 return self.run_mock()
+            if len(str(PW or "")) < 12:
+                raise FatalError(f"SIGNUP_PASSWORD 长度不足12位（当前 {len(str(PW or ''))}），OpenAI 会拒绝并停留在创建密码页")
             # ═══ 准备 ═══
             email = self.prepare_email()
             last_phone_error = ""
