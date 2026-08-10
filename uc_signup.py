@@ -929,19 +929,36 @@ class SignupBot:
                 ))
                 log(f"  → {self.d.title}")
 
+            # CPA/OAuth 若强制手机，临时买号验证
+            self.ensure_oauth_phone_if_required()
+            phone = self.phone or phone
+            full_phone = self.fullPhone or full_phone
+
             # 授权（CPA）
             log(f"授权页: {self.d.title}")
-            self._step("授权", lambda: self.click("Continue"))
+            if "phone number required" not in str(self.d.title or "").lower():
+                self._step("授权", lambda: self.click("Continue"))
+            self.ensure_oauth_phone_if_required()
+            phone = self.phone or phone
+            full_phone = self.fullPhone or full_phone
+            if self._find_button("Continue"):
+                self.click_optional("Continue", wait_seconds=4)
 
             # ═══ Part 3: 捕获回调 → CPA ═══
             log("等待回调 localhost:1455...")
             callback_url = ""
-            for _ in range(15):
+            for _ in range(20):
                 url = self.d.current_url
+                titleLower = str(self.d.title or "").lower()
                 if "localhost:1455" in url or "code=" in url:
                     callback_url = url
                     log(f"  ✅ 回调: {url[:120]}")
                     break
+                if "phone number required" in titleLower or self.needs_phone_verification():
+                    self.ensure_oauth_phone_if_required()
+                    phone = self.phone or phone
+                    if self._find_button("Continue"):
+                        self.click_optional("Continue", wait_seconds=3)
                 time.sleep(2)
 
             if not callback_url:
@@ -993,6 +1010,25 @@ class SignupBot:
                 except: pass
             self.close_browser()
         return False
+
+    def ensure_oauth_phone_if_required(self):
+        titleLower = str(self.d.title or "").lower()
+        textLower = self.page_text().lower()
+        urlLower = self.d.current_url.lower()
+        if not (
+            "phone number required" in titleLower
+            or "phone number required" in textLower
+            or "add-phone" in urlLower
+            or self.needs_phone_verification()
+        ):
+            return False
+        log("OAuth/CPA 强制要求手机号，开始临时买号")
+        if not self.d.find_elements(By.CSS_SELECTOR, "input[name=phoneNumberInput], input[type=tel]"):
+            self.click_optional("Continue", wait_seconds=5)
+            time.sleep(2)
+        self.handle_forced_phone()
+        time.sleep(3)
+        return True
 
     def _click_account_button(self):
         """choose-account 页面：点第一个账户"""
