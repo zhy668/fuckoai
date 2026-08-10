@@ -557,6 +557,34 @@ class SignupBot:
             log(f"  取消手机号失败 {phone}: {e}", "warn")
             return False
 
+    def wait_after_email_submit(self, timeout=45):
+        deadline = time.time() + timeout
+        last_url = ""
+        while time.time() < deadline:
+            self.wait_ready(timeout=2)
+            last_url = self.d.current_url
+            urlLower = last_url.lower()
+            titleLower = str(self.d.title or "").lower()
+            textLower = self.page_text().lower()
+
+            if self.d.find_elements(By.CSS_SELECTOR, "input[name=new-password], input[autocomplete='new-password']"):
+                return "password"
+            if (
+                "email-verification" in urlLower
+                or "check your inbox" in titleLower
+                or "check your inbox" in textLower
+                or self.has_code_input()
+            ):
+                return "email-code"
+            if self.needs_phone_verification():
+                return "phone"
+            if self.has_profile_inputs():
+                return "profile"
+            time.sleep(1)
+        raise FatalError(
+            f"邮箱提交后页面未知: url={last_url[:180]} title={self.d.title} text={self.page_text()[:220]}"
+        )
+
     def wait_password_page(self, timeout=None):
         deadline = time.time() + (timeout or PHONE_PASSWORD_PAGE_TIMEOUT)
         last_url = ""
@@ -569,7 +597,7 @@ class SignupBot:
             except Exception:
                 pass
             time.sleep(1)
-        raise FatalError(f"邮箱提交后未进入创建密码页: {last_url[:160]} | title={self.d.title}")
+        raise FatalError(f"未进入创建密码页: {last_url[:160]} | title={self.d.title}")
 
     def has_code_input(self):
         return bool(self.d.find_elements(
@@ -595,6 +623,8 @@ class SignupBot:
     def looks_like_phone_otp(self):
         urlLower = self.d.current_url.lower()
         textLower = self.page_text().lower()
+        if "email-verification" in urlLower or "check your inbox" in textLower:
+            return False
         return any(k in urlLower for k in ("phone", "sms", "contact-verification")) or any(
             k in textLower for k in ("text message", "sent a code to +", "sms", "手机验证码")
         )
@@ -700,9 +730,23 @@ class SignupBot:
 
         self._step("Cookie", lambda: self.click_optional("Accept all"))
         self._step("填邮箱", lambda: self.enter_email_and_continue(email))
-        self.wait_password_page()
-        log(f"→ {self.d.title}")
 
+        stage = self.wait_after_email_submit()
+        log(f"→ 邮箱后阶段: {stage} | {self.d.title}")
+        if stage == "email-code":
+            self.submit_verification_code(email)
+            stage = self.wait_after_email_submit()
+            log(f"→ 邮箱码后阶段: {stage} | {self.d.title}")
+        if stage == "phone":
+            self.handle_forced_phone()
+            stage = self.wait_after_email_submit()
+        if stage == "profile":
+            self.fill_profile()
+            return self.phone, self.fullPhone
+        if stage != "password":
+            self.wait_password_page()
+
+        log(f"→ {self.d.title}")
         self._step("填密码", lambda: (
             self.fill("input[name=new-password]", PW),
             self.click("Continue"),
