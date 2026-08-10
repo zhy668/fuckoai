@@ -270,6 +270,8 @@ class SignupBot:
         self.d = None
         self.requested_email = str(email or "").strip()
         self.localProxy = None
+        self.phone = ""
+        self.fullPhone = ""
 
     def resolve_chrome_proxy(self):
         proxy = str(PROXY or "").strip()
@@ -555,8 +557,8 @@ class SignupBot:
             log(f"  取消手机号失败 {phone}: {e}", "warn")
             return False
 
-    def wait_password_input_after_phone(self):
-        deadline = time.time() + PHONE_PASSWORD_PAGE_TIMEOUT
+    def wait_password_page(self, timeout=None):
+        deadline = time.time() + (timeout or PHONE_PASSWORD_PAGE_TIMEOUT)
         last_url = ""
         while time.time() < deadline:
             self.wait_ready(timeout=2)
@@ -567,64 +569,59 @@ class SignupBot:
             except Exception:
                 pass
             time.sleep(1)
-        raise PhoneRetry(
-            f"手机号提交后未进入创建密码页，可能已被使用: {last_url[:120]}",
-            cancel_phone=False,
+        raise FatalError(f"邮箱提交后未进入创建密码页: {last_url[:160]} | title={self.d.title}")
+
+    def has_code_input(self):
+        return bool(self.d.find_elements(
+            By.CSS_SELECTOR,
+            "input[name=code], input[autocomplete='one-time-code'], input[inputmode=numeric]",
+        ))
+
+    def has_profile_inputs(self):
+        return bool(self.d.find_elements(By.CSS_SELECTOR, "input[name=name], input[name=age]"))
+
+    def needs_phone_verification(self):
+        urlLower = self.d.current_url.lower()
+        textLower = self.page_text().lower()
+        if self.d.find_elements(By.CSS_SELECTOR, "input[name=phoneNumberInput], input[type=tel]"):
+            if any(k in urlLower for k in ("phone", "contact-verification", "add-phone", "verify")):
+                return True
+            if any(k in textLower for k in ("phone number", "verify your phone", "add a phone", "手机号", "验证手机")):
+                return True
+        if any(k in urlLower for k in ("phone-verification", "add-phone", "about-you/phone")):
+            return True
+        return False
+
+    def looks_like_phone_otp(self):
+        urlLower = self.d.current_url.lower()
+        textLower = self.page_text().lower()
+        return any(k in urlLower for k in ("phone", "sms", "contact-verification")) or any(
+            k in textLower for k in ("text message", "sent a code to +", "sms", "手机验证码")
         )
 
-    def register_with_phone(self, phone, email):
-        full_phone = "+" + re.sub(r'\D', '', phone)
-        log(f"📱 {phone}  📧 {email}")
+    def enter_email_and_continue(self, email):
+        selectors = [
+            "input[type=email]",
+            "input[name=email]",
+            "input[autocomplete=email]",
+            "input[id=email]",
+            "input[name=username]",
+        ]
+        filled = False
+        for sel in selectors:
+            try:
+                self.fill(sel, email)
+                filled = True
+                break
+            except StepError:
+                continue
+        if not filled:
+            self.fill_any(selectors, email)
+        # Prefer plain Continue; never click Continue with phone here.
+        self.click("Continue")
+        time.sleep(4)
 
-        self.launch()
-
-        self.d.get(TARGET_URL)
-        time.sleep(12)
-        log(f"注册: {self.d.title}")
-
-        self._step("Cookie", lambda: self.click_optional("Accept all"))
-
-        self._step("展开手机表单", lambda: (
-            self.click("Continue with phone"), time.sleep(4)
-        ))
-
-        self._step("填手机号", lambda: (
-            self.fill("input[name=phoneNumberInput]", full_phone),
-            self.click("Continue")
-        ))
-        self.wait_password_input_after_phone()
-        log(f"→ {self.d.title}")
-
-        self._step("填密码", lambda: (
-            self.fill("input[name=new-password]", PW),
-            self.click("Continue")
-        ))
-        afterPassword = self.wait_after_password()
-        log(f"→ {self.d.title} ({afterPassword})")
-
-        if afterPassword == "profile":
-            log("  已跳过验证码页，直接进入资料页")
-            self._step("姓名年龄", lambda: (
-                self.fill("input[name=name]", NAME),
-                self.fill("input[name=age]", AGE),
-                self.click("Finish creating account")
-            ))
-            time.sleep(8)
-            log(f"✅ 注册完成: {self.d.title}")
-            return full_phone
-
-        code = self.poll_sms(phone)
-        if not code:
-            raise PhoneRetry(f"短信验证码 {SMS_TIMEOUT_SECONDS}s 超时", cancel_phone=True)
-        log(f"  SMS: {code}")
-
-        self._step("短信验证", lambda: (
-            self.fill_any(["input[name=code]", "input[autocomplete='one-time-code']", "input[inputmode=numeric]"], code),
-            self.click("Continue")
-        ))
-        time.sleep(3)
-        log(f"→ {self.d.title}")
-
+    def fill_profile(self):
         self._step("姓名年龄", lambda: (
             self.fill("input[name=name]", NAME),
             self.fill("input[name=age]", AGE),
@@ -632,7 +629,116 @@ class SignupBot:
         ))
         time.sleep(8)
         log(f"✅ 注册完成: {self.d.title}")
-        return full_phone
+
+    def purchase_phone(self):
+        item = api("POST", "/api/purchase", {})["item"]
+        phone = str(item["phoneNumber"])
+        fullPhone = "+" + re.sub(r"\D", "", phone)
+        log(f"  页面强制手机验证，临时买号: {phone}")
+        return phone, fullPhone
+
+    def submit_phone_number(self, fullPhone):
+        if self.d.find_elements(By.CSS_SELECTOR, "input[name=phoneNumberInput]"):
+            self.fill("input[name=phoneNumberInput]", fullPhone)
+        else:
+            self.fill_any(["input[type=tel]", "input[name=phone]", "input[autocomplete=tel]"], fullPhone)
+        self.click("Continue")
+        time.sleep(4)
+
+    def handle_forced_phone(self):
+        phone, fullPhone = self.purchase_phone()
+        self.phone = phone
+        self.fullPhone = fullPhone
+        self._step("填强制手机号", lambda: self.submit_phone_number(fullPhone))
+        if self.has_code_input() or self.looks_like_phone_otp():
+            code = self.poll_sms(phone)
+            if not code:
+                raise PhoneRetry(f"短信验证码 {SMS_TIMEOUT_SECONDS}s 超时", cancel_phone=True)
+            log(f"  SMS: {code}")
+            self._step("短信验证", lambda: (
+                self.fill_any(
+                    ["input[name=code]", "input[autocomplete='one-time-code']", "input[inputmode=numeric]"],
+                    code,
+                ),
+                self.click("Continue"),
+            ))
+            time.sleep(3)
+        return phone, fullPhone
+
+    def submit_verification_code(self, email):
+        if self.looks_like_phone_otp():
+            if not self.phone:
+                self.handle_forced_phone()
+                return
+            code = self.poll_sms(self.phone)
+            if not code:
+                raise PhoneRetry(f"短信验证码 {SMS_TIMEOUT_SECONDS}s 超时", cancel_phone=True)
+            log(f"  SMS: {code}")
+        else:
+            code = self.poll_email(email)
+            if not code:
+                raise FatalError("邮箱验证码超时")
+            log(f"  邮箱码: {code}")
+        self._step("提交验证码", lambda: (
+            self.fill_any(
+                ["input[name=code]", "input[autocomplete='one-time-code']", "input[inputmode=numeric]"],
+                code,
+            ),
+            self.click("Continue"),
+        ))
+        time.sleep(3)
+
+    def register_with_email(self, email):
+        self.phone = ""
+        self.fullPhone = ""
+        log(f"📧 邮箱注册: {email}")
+
+        self.launch()
+        self.d.get(TARGET_URL)
+        time.sleep(12)
+        log(f"注册: {self.d.title}")
+
+        self._step("Cookie", lambda: self.click_optional("Accept all"))
+        self._step("填邮箱", lambda: self.enter_email_and_continue(email))
+        self.wait_password_page()
+        log(f"→ {self.d.title}")
+
+        self._step("填密码", lambda: (
+            self.fill("input[name=new-password]", PW),
+            self.click("Continue"),
+        ))
+        afterPassword = self.wait_after_password()
+        log(f"→ {self.d.title} ({afterPassword})")
+
+        for _ in range(6):
+            if self.has_profile_inputs():
+                self.fill_profile()
+                return self.phone, self.fullPhone
+
+            if self.needs_phone_verification():
+                self.handle_forced_phone()
+                continue
+
+            if self.has_code_input():
+                self.submit_verification_code(email)
+                continue
+
+            # Some flows land on about-you without obvious inputs yet.
+            if "about-you" in self.d.current_url.lower():
+                time.sleep(2)
+                if self.has_profile_inputs():
+                    self.fill_profile()
+                    return self.phone, self.fullPhone
+
+            break
+
+        if self.has_profile_inputs():
+            self.fill_profile()
+            return self.phone, self.fullPhone
+
+        raise FatalError(
+            f"邮箱注册后未完成资料页: url={self.d.current_url[:180]} title={self.d.title} text={self.page_text()[:220]}"
+        )
 
     # ── 步骤执行器（带错误恢复）──────────────────────────
     def _step(self, name, fn):
@@ -680,37 +786,19 @@ class SignupBot:
                 raise FatalError(f"SIGNUP_PASSWORD 长度不足12位（当前 {len(str(PW or ''))}），OpenAI 会拒绝并停留在创建密码页")
             # ═══ 准备 ═══
             email = self.prepare_email()
-            last_phone_error = ""
-            phone_attempt = 0
-            while True:
-                phone_attempt += 1
-                if PHONE_RETRY_LIMIT > 0:
-                    attempt_label = f"{phone_attempt}/{PHONE_RETRY_LIMIT}"
-                else:
-                    attempt_label = f"{phone_attempt}/不限"
-                if PHONE_RETRY_LIMIT > 0 and phone_attempt > PHONE_RETRY_LIMIT:
-                    raise FatalError(f"同一邮箱换号重试已达上限: {last_phone_error}")
+            phone = ""
+            full_phone = ""
+            try:
+                phone, full_phone = self.register_with_email(email)
+            except PhoneRetry as e:
+                log(f"  强制手机验证失败: {e}", "warn")
+                if e.cancel_phone and self.phone:
+                    self.cancel_phone(self.phone, str(e))
+                raise FatalError(str(e)) from e
+            phone = self.phone or phone
+            full_phone = self.fullPhone or full_phone
 
-                phone = api("POST", "/api/purchase", {})["item"]["phoneNumber"]
-                log(f"  手机号尝试 {attempt_label}")
-                try:
-                    full_phone = self.register_with_phone(phone, email)
-                    break
-                except PhoneRetry as e:
-                    last_phone_error = str(e)
-                    log(f"  当前手机号不可用: {e}", "warn")
-                    if e.cancel_phone:
-                        log("  准备取消旧手机号，随后购买新手机号并从注册页重新开始", "warn")
-                        self.cancel_phone(phone, str(e))
-                    else:
-                        log(f"  未使用短信验证码，不取消手机号 {phone}", "warn")
-                    phone = ""
-                    full_phone = ""
-                    self.close_browser()
-                    log(f"  继续使用同一邮箱换下一个手机号，从头开始注册: {email}", "warn")
-                    continue
-
-            # ═══ Part 2: OAuth（同一浏览器，保持登录态）═══
+            # ═══ Part 2: OAuth / CPA 授权（同一浏览器，保持登录态）═══
             oa = api("GET", "/api/codex-oauth/url")
             oa_url = oa.get("url", "")
             oa_state = oa.get("state", "")
@@ -727,13 +815,20 @@ class SignupBot:
                 self._step("选账户", lambda: self._click_account_button())
 
             elif "log-in" in url:
-                # prompt=login 强制重新验证
-                self._step("OAuth手机号", lambda: (
-                    self.d.get("https://auth.openai.com/log-in?usernameKind=phone_number"),
-                    time.sleep(5),
-                    self.fill_any(["input[type=tel]"], full_phone),
-                    self.click("Continue"), time.sleep(5)
-                ))
+                if full_phone:
+                    self._step("OAuth手机号", lambda: (
+                        self.d.get("https://auth.openai.com/log-in?usernameKind=phone_number"),
+                        time.sleep(5),
+                        self.fill_any(["input[type=tel]"], full_phone),
+                        self.click("Continue"), time.sleep(5)
+                    ))
+                else:
+                    self._step("OAuth邮箱", lambda: (
+                        self.d.get("https://auth.openai.com/log-in?usernameKind=email"),
+                        time.sleep(5),
+                        self.fill_any(["input[type=email]", "input[name=email]", "input[name=username]"], email),
+                        self.click("Continue"), time.sleep(5)
+                    ))
                 log(f"  → {self.d.title}")
 
                 self._step("OAuth密码", lambda: (
@@ -742,7 +837,7 @@ class SignupBot:
                 ))
                 log(f"  → {self.d.title}")
 
-            # 绑定邮箱
+            # 绑定邮箱（手机号账号场景）
             if "add-email" in self.d.current_url.lower():
                 self._step("绑定邮箱", lambda: (
                     self.fill_any(["input[type=email]", "input[name=email]"], email),
@@ -760,7 +855,7 @@ class SignupBot:
                 ))
                 log(f"  → {self.d.title}")
 
-            # 授权
+            # 授权（CPA）
             log(f"授权页: {self.d.title}")
             self._step("授权", lambda: self.click("Continue"))
 
@@ -803,8 +898,9 @@ class SignupBot:
             log(f"  凭证: {json.dumps(files, ensure_ascii=False)[:500]}")
 
             # 清理
-            try: api("POST", f"/api/phones/{phone}/finish")
-            except: pass
+            if phone:
+                try: api("POST", f"/api/phones/{phone}/finish")
+                except: pass
 
             log("=" * 55)
             log(f"✅ 全部完成! {email}")
