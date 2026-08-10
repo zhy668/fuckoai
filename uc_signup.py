@@ -273,6 +273,7 @@ class SignupBot:
         self.localProxy = None
         self.phone = ""
         self.fullPhone = ""
+        self.usedEmailCodes = set()
 
     def resolve_chrome_proxy(self):
         proxy = str(PROXY or "").strip()
@@ -477,7 +478,8 @@ class SignupBot:
                 try: el.clear()
                 except: pass
                 for ch in value: el.send_keys(ch); time.sleep(0.03)
-                log(f"  填入: {value}")
+                shown = "***" if ("password" in selector.lower() or value == PW) else value
+                log(f"  填入: {shown}")
                 return
             except Exception as e:
                 if attempt == retries - 1:
@@ -492,12 +494,15 @@ class SignupBot:
         # 兜底：找任意 input
         for inp in self.d.find_elements(By.CSS_SELECTOR, "input:not([type=hidden]):not([type=submit])"):
             try:
+                inputType = (inp.get_attribute("type") or "").lower()
+                inputName = (inp.get_attribute("name") or "").lower()
                 ActionChains(self.d).move_to_element(inp).click().perform()
                 time.sleep(0.2)
                 try: inp.clear()
                 except: pass
                 for ch in value: inp.send_keys(ch); time.sleep(0.03)
-                log(f"  填入(fb): {value}")
+                shown = "***" if (inputType == "password" or "password" in inputName or value == PW) else value
+                log(f"  填入(fb): {shown}")
                 return
             except: pass
         raise StepError("找不到任何输入框")
@@ -519,17 +524,26 @@ class SignupBot:
             time.sleep(min(SMS_POLL_INTERVAL_SECONDS, max(1, deadline - time.time())))
         return None
 
-    def poll_email(self, addr):
-        for i in range(15):
+    def poll_email(self, addr, excludeCodes=None):
+        exclude = {str(c) for c in (excludeCodes or ())}
+        exclude |= {str(c) for c in getattr(self, "usedEmailCodes", set())}
+        for i in range(18):
             try:
                 r = api("GET", f"/api/gmail/mail/latest?address={quote(str(addr), safe='')}")
                 item = r.get("item", {}) or r.get("mail", {})
                 txt = str(item.get("decodedText","")) + " " + str(item.get("decodedSubject",""))
-                m = re.search(r'\b(\d{6})\b', txt)
-                if m: return m.group(1)
-                if item.get("verificationCode"): return str(item["verificationCode"])
+                candidates = []
+                if item.get("verificationCode"):
+                    candidates.append(str(item["verificationCode"]))
+                candidates.extend(re.findall(r"\b(\d{6})\b", txt))
+                for code in candidates:
+                    if code and code not in exclude:
+                        if not hasattr(self, "usedEmailCodes"):
+                            self.usedEmailCodes = set()
+                        self.usedEmailCodes.add(code)
+                        return code
             except: pass
-            if i % 3 == 0: log(f"  邮箱 {i+1}/15")
+            if i % 3 == 0: log(f"  邮箱 {i+1}/18")
             time.sleep(10)
         return None
 
@@ -1033,27 +1047,28 @@ class SignupBot:
                 self._step("选账户", lambda: self._click_account_button())
 
             elif "log-in" in url:
-                if full_phone:
+                # Prefer staying on current login page; only force email kind when needed.
+                if full_phone and "phone" in url.lower():
                     self._step("OAuth手机号", lambda: (
-                        self.d.get("https://auth.openai.com/log-in?usernameKind=phone_number"),
-                        time.sleep(5),
                         self.fill_any(["input[type=tel]"], full_phone),
                         self.click("Continue"), time.sleep(5)
                     ))
                 else:
+                    if not self.d.find_elements(By.CSS_SELECTOR, "input[type=email], input[name=email], input[name=username]"):
+                        self.d.get("https://auth.openai.com/log-in?usernameKind=email")
+                        time.sleep(5)
                     self._step("OAuth邮箱", lambda: (
-                        self.d.get("https://auth.openai.com/log-in?usernameKind=email"),
-                        time.sleep(5),
                         self.fill_any(["input[type=email]", "input[name=email]", "input[name=username]"], email),
                         self.click("Continue"), time.sleep(5)
                     ))
                 log(f"  → {self.d.title}")
 
-                self._step("OAuth密码", lambda: (
-                    self.fill_any(["input[type=password]", "input[name=current-password]"], PW),
-                    self.click("Continue"), time.sleep(5)
-                ))
-                log(f"  → {self.d.title}")
+                if self.d.find_elements(By.CSS_SELECTOR, "input[type=password], input[name=current-password]"):
+                    self._step("OAuth密码", lambda: (
+                        self.fill_any(["input[type=password]", "input[name=current-password]"], PW),
+                        self.click("Continue"), time.sleep(5)
+                    ))
+                    log(f"  → {self.d.title}")
 
             # 绑定邮箱（手机号账号场景）
             if "add-email" in self.d.current_url.lower():
@@ -1062,63 +1077,18 @@ class SignupBot:
                     self.click("Continue"), time.sleep(5)
                 ))
                 log(f"  → {self.d.title}")
+                self.ensure_oauth_email_code_if_required(email)
 
-                code2 = self.poll_email(email)
-                if not code2: raise FatalError("邮箱码超时")
-                log(f"  邮箱码: {code2}")
-
-                self._step("邮箱验证", lambda: (
-                    self.fill("input[name=code]", code2),
-                    self.click("Continue"), time.sleep(5)
-                ))
-                log(f"  → {self.d.title}")
-
-            # CPA/OAuth 若强制手机，临时买号验证
-            self.ensure_oauth_phone_if_required()
+            # 统一推进：邮箱OTP / 强制手机 / 授权同意 / 回调
+            log("推进 OAuth 授权门禁...")
+            callback_url = self.progress_oauth_until_callback(email)
             phone = self.phone or phone
             full_phone = self.fullPhone or full_phone
 
-            # 授权（CPA）
-            log(f"授权页: {self.d.title}")
-            if "phone number required" not in str(self.d.title or "").lower():
-                self._step("授权", lambda: self.click("Continue"))
-            self.ensure_oauth_phone_if_required()
-            phone = self.phone or phone
-            full_phone = self.fullPhone or full_phone
-            if self._find_button("Continue"):
-                self.click_optional("Continue", wait_seconds=4)
-
-            # ═══ Part 3: 捕获回调 → CPA ═══
-            log("等待回调 localhost:1455...")
-            callback_url = ""
-            for _ in range(20):
-                url = self.d.current_url
-                titleLower = str(self.d.title or "").lower()
-                if "localhost:1455" in url or "code=" in url:
-                    callback_url = url
-                    log(f"  ✅ 回调: {url[:120]}")
-                    break
-                if "phone number required" in titleLower or self.needs_phone_verification():
-                    self.ensure_oauth_phone_if_required()
-                    phone = self.phone or phone
-                    if self._find_button("Continue"):
-                        self.click_optional("Continue", wait_seconds=3)
-                time.sleep(2)
-
             if not callback_url:
-                # 可能在 consent 页没点到
-                self._step("重试授权", lambda: self.click("Continue"))
-                time.sleep(5)
-                for _ in range(10):
-                    url = self.d.current_url
-                    if "localhost:1455" in url or "code=" in url:
-                        callback_url = url
-                        log(f"  ✅ 回调: {url[:120]}")
-                        break
-                    time.sleep(2)
-
-            if not callback_url:
-                raise FatalError("OAuth回调超时")
+                raise FatalError(
+                    f"OAuth回调超时: url={self.d.current_url[:180]} title={self.d.title} text={self.page_text()[:220]}"
+                )
 
             # CPA 回填
             log("📤 回填CPA...")
@@ -1155,6 +1125,75 @@ class SignupBot:
             self.close_browser()
         return False
 
+    def looks_like_email_otp(self):
+        urlLower = self.d.current_url.lower()
+        titleLower = str(self.d.title or "").lower()
+        textLower = self.page_text().lower()
+        if self.looks_like_phone_otp():
+            return False
+        return (
+            "email-verification" in urlLower
+            or "email-otp" in urlLower
+            or "check your inbox" in titleLower
+            or "check your inbox" in textLower
+            or (
+                self.has_code_input()
+                and any(k in (urlLower + " " + textLower) for k in ("email", "inbox", "we sent", "sent a code"))
+            )
+        )
+
+    def ensure_oauth_email_code_if_required(self, email):
+        if not (self.looks_like_email_otp() or (self.has_code_input() and not self.looks_like_phone_otp() and "check your inbox" in str(self.d.title or "").lower())):
+            return False
+        log("OAuth 需要邮箱验证码，开始收信")
+        self.submit_verification_code(email)
+        time.sleep(3)
+        return True
+
+    def progress_oauth_until_callback(self, email, maxRounds=24):
+        """Advance OAuth gates until localhost callback appears."""
+        for roundIdx in range(1, maxRounds + 1):
+            self.wait_ready(timeout=2)
+            url = self.d.current_url
+            titleLower = str(self.d.title or "").lower()
+            urlLower = url.lower()
+
+            if "localhost:1455" in url or ("code=" in url and "state=" in url):
+                log(f"  ✅ 回调: {url[:120]}")
+                return url
+
+            if "choose-an-account" in urlLower:
+                log(f"  OAuth 选账户 ({roundIdx})")
+                self._click_account_button()
+                continue
+
+            if self.ensure_oauth_email_code_if_required(email):
+                continue
+
+            if self.ensure_oauth_phone_if_required():
+                continue
+
+            if self.d.find_elements(By.CSS_SELECTOR, "input[type=password], input[name=current-password]"):
+                log(f"  OAuth 补填密码 ({roundIdx})")
+                self.fill_any(["input[type=password]", "input[name=current-password]"], PW)
+                self.click("Continue")
+                time.sleep(3)
+                continue
+
+            if self.looks_like_email_otp() or self.has_code_input():
+                # Avoid blind Continue on OTP pages.
+                time.sleep(2)
+                continue
+
+            if self._find_button("Continue") and "phone number required" not in titleLower:
+                log(f"授权页: {self.d.title}")
+                self.click_optional("Continue", wait_seconds=4)
+                time.sleep(2)
+                continue
+
+            time.sleep(2)
+        return ""
+
     def ensure_oauth_phone_if_required(self):
         titleLower = str(self.d.title or "").lower()
         textLower = self.page_text().lower()
@@ -1179,7 +1218,7 @@ class SignupBot:
         for b in self.d.find_elements(By.TAG_NAME, "button"):
             try:
                 bt = (b.text or "").strip()
-                if "Select account" in bt or ("+" in bt and len(bt) > 10):
+                if "Select account" in bt or ("+" in bt and len(bt) > 10) or "@" in bt:
                     log(f"  点击: {bt[:60]}")
                     ActionChains(self.d).move_to_element(b).click().perform()
                     time.sleep(5)
