@@ -3,8 +3,6 @@
   "PORT": "3030",
   "HERO_SMS_API_KEY": "",
   "HERO_SMS_API_URL": "https://hero-sms.com/stubs/handler_api.php",
-  "TEMP_MAIL_API_URL": "",
-  "TEMP_MAIL_ADMIN_PASSWORD": "",
   "GMAIL_IMAP_HOST": "imap.gmail.com",
   "GMAIL_IMAP_PORT": "993",
   "GMAIL_USERNAME": "",

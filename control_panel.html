@@ -384,7 +384,6 @@
               <button id="loadEmailQueueBtn">重新加载</button>
               <button id="importEmailListBtn">导入 TXT/CSV</button>
               <input id="emailListFile" type="file" accept=".txt,.csv,text/plain,text/csv" hidden>
-              <button id="mailCodeBtn">查邮箱验证码</button>
               <button id="gmailMailBtn">从 Gmail 查邮件</button>
             </div>
             <p id="emailQueueState" class="muted">--</p>
@@ -404,7 +403,6 @@
           <div class="metrics">
             <div class="metric"><b>API</b><span id="apiState">--</span></div>
             <div class="metric"><b>HeroSMS</b><span id="heroState">--</span></div>
-            <div class="metric"><b>Temp Mail</b><span id="mailState">--</span></div>
             <div class="metric"><b>Gmail IMAP</b><span id="gmailState">--</span></div>
             <div class="metric"><b>CPA/OAuth</b><span id="cpaState">--</span></div>
           </div>
@@ -477,7 +475,6 @@
     const appSettingKeys = [
       "HOST", "PORT",
       "HERO_SMS_API_KEY", "HERO_SMS_API_URL",
-      "TEMP_MAIL_API_URL", "TEMP_MAIL_ADMIN_PASSWORD",
       "GMAIL_IMAP_HOST", "GMAIL_IMAP_PORT", "GMAIL_USERNAME", "GMAIL_FOLDER",
       "GMAIL_UNSEEN_ONLY", "GMAIL_MARK_SEEN", "GMAIL_SEARCH_LIMIT",
       "CPA_BASE_URL", "CPA_MANAGEMENT_KEY",
@@ -493,8 +490,6 @@
       PORT: "服务端口",
       HERO_SMS_API_KEY: "HeroSMS 接口密钥",
       HERO_SMS_API_URL: "HeroSMS 接口地址",
-      TEMP_MAIL_API_URL: "临时邮箱接口地址",
-      TEMP_MAIL_ADMIN_PASSWORD: "临时邮箱管理员密码",
       GMAIL_IMAP_HOST: "Gmail IMAP 主机",
       GMAIL_IMAP_PORT: "Gmail IMAP SSL 端口",
       GMAIL_USERNAME: "Gmail 收件账号",
@@ -522,8 +517,7 @@
       PURCHASE_CONFIG_FILE: "购买配置文件",
     };
     const secretKeys = new Set([
-      "HERO_SMS_API_KEY", "TEMP_MAIL_ADMIN_PASSWORD",
-      "CPA_MANAGEMENT_KEY", "SIGNUP_PASSWORD",
+      "HERO_SMS_API_KEY", "CPA_MANAGEMENT_KEY", "SIGNUP_PASSWORD",
     ]);
     let purchaseSettingsState = { serviceName: "OpenAI", serviceCode: "dr", purchaseGroups: [] };
     let countryOptions = [];
@@ -665,7 +659,6 @@
       const health = await requestJSON("GET", "/api/health");
       setState("apiState", health.ok, health.ok ? "运行中" : "异常");
       setState("heroState", health.configured, health.configured ? "已配置" : "未配置");
-      setState("mailState", health.tempMailConfigured, health.tempMailConfigured ? "已配置" : "未配置");
       setState("gmailState", health.gmailConfigured, health.gmailConfigured ? "已配置" : "未配置");
       setState("cpaState", health.cpaConfigured, health.cpaConfigured ? "已配置" : "未配置");
       return health;
@@ -1130,14 +1123,6 @@
       $("emailListFile").value = "";
     }
 
-    async function refreshEmailCode() {
-      const email = $("emailCurrent").value.trim();
-      const url = email ? `/api/email-queue/mail/latest?address=${encodeURIComponent(email)}` : "/api/email-queue/mail/latest";
-      const payload = await requestJSON("GET", url);
-      updateEmailQueueUI(payload.emailQueue || {});
-      log(payload);
-    }
-
     async function refreshGmailMail() {
       const email = $("emailCurrent").value.trim();
       const url = email ? `/api/gmail/mail/latest?address=${encodeURIComponent(email)}` : "/api/gmail/mail/latest";
@@ -1268,7 +1253,6 @@
     $("generateEmailQueueBtn").onclick = () => run(generateEmailQueue);
     $("saveEmailQueueBtn").onclick = () => run(saveEmailQueue);
     $("loadEmailQueueBtn").onclick = () => run(loadEmailQueue);
-    $("mailCodeBtn").onclick = () => run(refreshEmailCode);
     $("importEmailListBtn").onclick = () => $("emailListFile").click();
     $("emailListFile").onchange = () => run(importEmailList);
     $("gmailMailBtn").onclick = () => run(refreshGmailMail);

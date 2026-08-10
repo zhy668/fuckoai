@@ -5,7 +5,7 @@ Linux 容器版注册控制面板。
 ## 功能
 
 - Web 控制面板：`/ui`
-- 临时邮箱队列生成和验证码读取
+- 邮箱列表导入与 Gmail IMAP 收件
 - 购买组可视化配置，保存到本地 `data/purchase_config.json`
 - Linux 图形浏览器自动注册入口，通过 Xvfb、x11vnc、noVNC 查看
 
@@ -40,7 +40,7 @@ ADMIN_PASSWORD=你的控制面板管理员密码
 cp config.example.json config.json
 ```
 
-模板已包含 HeroSMS 接口地址、注册资料默认值、浏览器参数和 Gmail IMAP 非敏感配置；接口密钥、临时邮箱、CPA 等用户配置默认为空。Gmail 应用专用密码不写入 `config.json`，只从环境变量 `GMAIL_APP_PASSWORD` 读取。
+模板已包含 HeroSMS 接口地址、注册资料默认值、浏览器参数和 Gmail IMAP 非敏感配置；接口密钥、CPA 等用户配置默认为空。Gmail 应用专用密码不写入 `config.json`，只从环境变量 `GMAIL_APP_PASSWORD` 读取。
 
 Gmail 示例配置：
 
@@ -93,7 +93,7 @@ python3 server.py
 
 ## 邮箱列表导入与 Gmail 收件
 
-控制面板支持导入 TXT/CSV 邮箱列表。文件中每行一个地址即可，也支持从 CSV 行中提取邮箱地址；导入后点击“保存列表”。`@icloud.com` 地址可以作为已有邮箱直接导入，系统不会创建 iCloud 邮箱，也不会替你配置 iCloud 转发。
+控制面板支持导入 TXT/CSV 邮箱列表和 Gmail IMAP 收件。旧 Temp Mail 配置入口已移除；`@icloud.com` 地址可以作为已有邮箱直接导入，系统不会创建 iCloud 邮箱，也不会替你配置 iCloud 转发。
 
 在 iCloud 中把这些地址的邮件转发到同一个 Gmail 后，服务端可以通过 Gmail IMAP 查询最新转发邮件：
 

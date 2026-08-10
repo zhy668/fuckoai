@@ -53,8 +53,6 @@ APP_SETTING_FIELDS = (
     "PORT",
     "HERO_SMS_API_KEY",
     "HERO_SMS_API_URL",
-    "TEMP_MAIL_API_URL",
-    "TEMP_MAIL_ADMIN_PASSWORD",
     "GMAIL_IMAP_HOST",
     "GMAIL_IMAP_PORT",
     "GMAIL_USERNAME",
@@ -87,8 +85,6 @@ DEFAULT_APP_SETTINGS: dict[str, Any] = {
     "PORT": "3030",
     "HERO_SMS_API_KEY": "",
     "HERO_SMS_API_URL": "https://hero-sms.com/stubs/handler_api.php",
-    "TEMP_MAIL_API_URL": "",
-    "TEMP_MAIL_ADMIN_PASSWORD": "",
     "GMAIL_IMAP_HOST": "imap.gmail.com",
     "GMAIL_IMAP_PORT": "993",
     "GMAIL_USERNAME": "",
@@ -263,8 +259,8 @@ class Config:
     enable_cors: bool = app_config_value("ENABLE_CORS", "true").lower() == "true"
     store_file: Path = ROOT / app_config_value("STORE_FILE", "./data/activations.json")
     purchase_config_file: Path = PURCHASE_CONFIG_PATH
-    temp_mail_api_url: str = app_config_value("TEMP_MAIL_API_URL", "")
-    temp_mail_admin_password: str = app_config_value("TEMP_MAIL_ADMIN_PASSWORD", "")
+    temp_mail_api_url: str = ""
+    temp_mail_admin_password: str = ""
     gmail_imap_host: str = app_config_value("GMAIL_IMAP_HOST", "imap.gmail.com")
     gmail_imap_port: int = int(app_config_value("GMAIL_IMAP_PORT", "993"))
     gmail_username: str = app_config_value("GMAIL_USERNAME", "")
@@ -298,8 +294,6 @@ class Config:
         self.default_country_aliases = []
         self.store_file = (ROOT / app_config_value("STORE_FILE", "./data/activations.json")).resolve()
         self.purchase_config_file = (ROOT / app_config_value("PURCHASE_CONFIG_FILE", "./data/purchase_config.json")).resolve()
-        self.temp_mail_api_url = app_config_value("TEMP_MAIL_API_URL", "").rstrip("/")
-        self.temp_mail_admin_password = app_config_value("TEMP_MAIL_ADMIN_PASSWORD", "")
         self.gmail_imap_host = app_config_value("GMAIL_IMAP_HOST", "imap.gmail.com").strip()
         self.gmail_imap_port = int(app_config_value("GMAIL_IMAP_PORT", "993"))
         self.gmail_username = app_config_value("GMAIL_USERNAME", "").strip()
@@ -1371,8 +1365,8 @@ def reload_runtime_config() -> None:
     CONFIG.enable_cors = app_config_value("ENABLE_CORS", "true").lower() == "true"
     CONFIG.store_file = (ROOT / app_config_value("STORE_FILE", "./data/activations.json")).resolve()
     CONFIG.purchase_config_file = (ROOT / app_config_value("PURCHASE_CONFIG_FILE", "./data/purchase_config.json")).resolve()
-    CONFIG.temp_mail_api_url = app_config_value("TEMP_MAIL_API_URL", "").rstrip("/")
-    CONFIG.temp_mail_admin_password = app_config_value("TEMP_MAIL_ADMIN_PASSWORD", "")
+    CONFIG.temp_mail_api_url = ""
+    CONFIG.temp_mail_admin_password = ""
     CONFIG.gmail_imap_host = app_config_value("GMAIL_IMAP_HOST", "imap.gmail.com").strip()
     CONFIG.gmail_imap_port = int(app_config_value("GMAIL_IMAP_PORT", "993"))
     CONFIG.gmail_username = app_config_value("GMAIL_USERNAME", "").strip()
@@ -2672,7 +2666,6 @@ class AppHandler(BaseHTTPRequestHandler):
                 {
                     "ok": True,
                     "configured": bool(CONFIG.api_key),
-                    "tempMailConfigured": bool(CONFIG.temp_mail_api_url and CONFIG.temp_mail_admin_password),
                     "gmailConfigured": GMAIL.configured,
                     "cpaConfigured": bool(CONFIG.cpa_base_url and CONFIG.cpa_management_key),
                     "apiUrl": CONFIG.api_url,
