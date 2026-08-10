@@ -619,8 +619,9 @@ class SignupBot:
         except Exception:
             return False
 
-    def wait_after_email_submit(self, timeout=60):
+    def wait_after_email_submit(self, timeout=60, ignoreCodeInputFor=0):
         deadline = time.time() + timeout
+        startedAt = time.time()
         last_url = ""
         sawLoading = False
         loadingStartedAt = None
@@ -635,12 +636,16 @@ class SignupBot:
                 return "profile"
             if self.d.find_elements(By.CSS_SELECTOR, "input[name=new-password], input[autocomplete='new-password']"):
                 return "password"
-            if (
+            codePage = (
                 "email-verification" in urlLower
                 or "check your inbox" in titleLower
                 or "check your inbox" in textLower
                 or self.has_code_input()
-            ):
+            )
+            if codePage:
+                if (time.time() - startedAt) < ignoreCodeInputFor:
+                    time.sleep(1)
+                    continue
                 return "email-code"
             if self.needs_phone_verification():
                 return "phone"
@@ -660,7 +665,7 @@ class SignupBot:
                 # Loading ended but still on landing — likely soft failure; keep waiting a bit.
                 pass
 
-            if any(k in textLower for k in ("failed to create account", "something went wrong", "too many requests")):
+            if any(k in textLower for k in ("failed to create account", "something went wrong", "too many requests", "incorrect code", "invalid code")):
                 raise FatalError(
                     f"邮箱提交被拒绝: url={last_url[:180]} title={self.d.title} text={textLower[:220]}"
                 )
@@ -919,57 +924,51 @@ class SignupBot:
             raise lastSubmitError or FatalError("邮箱提交失败")
 
         log(f"→ 邮箱后阶段: {stage} | {self.d.title}")
-        if stage == "email-code":
-            self.submit_verification_code(email)
-            stage = self.wait_after_email_submit()
-            log(f"→ 邮箱码后阶段: {stage} | {self.d.title}")
-        if stage == "phone":
-            self.handle_forced_phone()
-            stage = self.wait_after_email_submit()
-            log(f"→ 手机后阶段: {stage} | {self.d.title}")
-        if stage == "profile":
-            self.fill_profile()
-            return self.phone, self.fullPhone
-        if stage == "password":
-            log(f"→ {self.d.title}")
-            self._step("填密码", lambda: (
-                self.fill("input[name=new-password]", PW),
-                self.click("Continue"),
-            ))
-            afterPassword = self.wait_after_password()
-            log(f"→ {self.d.title} ({afterPassword})")
-        else:
+        for gate in range(1, 7):
+            if stage == "email-code":
+                log(f"→ 处理邮箱验证码 (gate {gate})")
+                if gate > 1:
+                    self.click_optional("Resend", wait_seconds=3)
+                    self.click_optional("Resend email", wait_seconds=2)
+                    time.sleep(2)
+                self.submit_verification_code(email)
+                stage = self.wait_after_email_submit(timeout=60, ignoreCodeInputFor=12)
+                log(f"→ 邮箱码后阶段: {stage} | {self.d.title}")
+                continue
+            if stage == "phone":
+                log(f"→ 处理强制手机 (gate {gate})")
+                self.handle_forced_phone()
+                stage = self.wait_after_email_submit(timeout=60, ignoreCodeInputFor=8)
+                log(f"→ 手机后阶段: {stage} | {self.d.title}")
+                continue
+            if stage == "profile":
+                self.fill_profile()
+                return self.phone, self.fullPhone
+            if stage == "password":
+                log(f"→ {self.d.title}")
+                self._step("填密码", lambda: (
+                    self.fill("input[name=new-password]", PW),
+                    self.click("Continue"),
+                ))
+                afterPassword = self.wait_after_password()
+                log(f"→ {self.d.title} ({afterPassword})")
+                if afterPassword == "profile" or self.has_profile_inputs():
+                    self.fill_profile()
+                    return self.phone, self.fullPhone
+                if afterPassword == "code-input" or self.looks_like_email_otp() or self.has_code_input():
+                    stage = "phone" if self.looks_like_phone_otp() else "email-code"
+                    continue
+                if self.needs_phone_verification():
+                    stage = "phone"
+                    continue
+                stage = self.wait_after_email_submit(timeout=45, ignoreCodeInputFor=8)
+                continue
             raise FatalError(
                 f"邮箱流程未知阶段: {stage} url={self.d.current_url[:180]} title={self.d.title}"
             )
 
-        for _ in range(6):
-            if self.has_profile_inputs():
-                self.fill_profile()
-                return self.phone, self.fullPhone
-
-            if self.needs_phone_verification():
-                self.handle_forced_phone()
-                continue
-
-            if self.has_code_input():
-                self.submit_verification_code(email)
-                continue
-
-            if "about-you" in self.d.current_url.lower():
-                time.sleep(2)
-                if self.has_profile_inputs():
-                    self.fill_profile()
-                    return self.phone, self.fullPhone
-
-            break
-
-        if self.has_profile_inputs():
-            self.fill_profile()
-            return self.phone, self.fullPhone
-
         raise FatalError(
-            f"邮箱注册后未完成资料页: url={self.d.current_url[:180]} title={self.d.title} text={self.page_text()[:220]}"
+            f"邮箱流程门禁重试耗尽: stage={stage} url={self.d.current_url[:180]} title={self.d.title}"
         )
 
     # ── 步骤执行器（带错误恢复）──────────────────────────
