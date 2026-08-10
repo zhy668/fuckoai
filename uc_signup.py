@@ -202,6 +202,11 @@ class SignupBot:
             last_url = self.d.current_url
             urlLower = last_url.lower()
 
+            if "failed to create account" in self.page_text().lower():
+                raise FatalError(
+                    f"OpenAI 拒绝创建账号: title={self.d.title} url={last_url[:160]} text={self.page_text()[:220]}"
+                )
+
             leftPasswordPage = "create-account/password" not in urlLower and not self.d.find_elements(
                 By.CSS_SELECTOR, "input[name=new-password], input[autocomplete='new-password']"
             )

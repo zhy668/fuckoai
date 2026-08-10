@@ -2,6 +2,7 @@ node_modules/
 .env
 config.json
 purchase_config.json
+proxy.json
 data/
 __pycache__/
 *.pyc
