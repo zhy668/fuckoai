@@ -3,11 +3,11 @@
 ChatGPT 注册 + OAuth CPA 回调（最终版）
 用法: python3 uc_signup.py
 """
-import argparse, json, os, re, shutil, signal, subprocess, sys, time
+import argparse, base64, json, os, re, select, shutil, signal, socket, subprocess, sys, threading, time
 from datetime import datetime
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 import undetected_chromedriver as uc
@@ -122,6 +122,129 @@ CHROME_BINARY = detect_chrome_binary()
 CHROME_VERSION = detect_chrome_version(CHROME_BINARY)
 CHROMEDRIVER_BINARY = detect_chromedriver_binary()
 
+class LocalAuthProxy:
+    """Chrome-compatible local forwarder for authenticated upstream HTTP proxies."""
+
+    def __init__(self, upstreamProxy):
+        parsed = urlparse(upstreamProxy if "://" in upstreamProxy else f"http://{upstreamProxy}")
+        if not parsed.hostname or not parsed.port:
+            raise FatalError(f"代理地址无效: {upstreamProxy}")
+        self.upHost = parsed.hostname
+        self.upPort = int(parsed.port)
+        self.authHeader = None
+        if parsed.username is not None:
+            token = base64.b64encode(f"{parsed.username}:{parsed.password or ''}".encode()).decode()
+            self.authHeader = f"Basic {token}"
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(64)
+        self.port = self.sock.getsockname()[1]
+        self.stopFlag = False
+        self.thread = threading.Thread(target=self._serve, name="local-auth-proxy", daemon=True)
+        self.thread.start()
+
+    @property
+    def chromeProxy(self):
+        return f"http://127.0.0.1:{self.port}"
+
+    def close(self):
+        self.stopFlag = True
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+
+    def _serve(self):
+        while not self.stopFlag:
+            try:
+                self.sock.settimeout(1.0)
+                client, _ = self.sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            threading.Thread(target=self._handle, args=(client,), daemon=True).start()
+
+    def _handle(self, client):
+        upstream = None
+        try:
+            client.settimeout(45)
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = client.recv(4096)
+                if not chunk:
+                    return
+                data += chunk
+                if len(data) > 65536:
+                    return
+            header, rest = data.split(b"\r\n\r\n", 1)
+            requestLine = header.split(b"\r\n", 1)[0].decode("latin1", errors="replace")
+            parts = requestLine.split(" ")
+            if len(parts) < 2:
+                return
+            method, target = parts[0].upper(), parts[1]
+            upstream = socket.create_connection((self.upHost, self.upPort), timeout=45)
+            upstream.settimeout(45)
+            if method == "CONNECT":
+                req = f"CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n"
+                if self.authHeader:
+                    req += f"Proxy-Authorization: {self.authHeader}\r\n"
+                req += "Proxy-Connection: Keep-Alive\r\n\r\n"
+                upstream.sendall(req.encode())
+                resp = b""
+                while b"\r\n\r\n" not in resp:
+                    chunk = upstream.recv(4096)
+                    if not chunk:
+                        return
+                    resp += chunk
+                status = resp.split(b"\r\n", 1)[0]
+                if b" 200 " not in status:
+                    client.sendall(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
+                    return
+                client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                if rest:
+                    upstream.sendall(rest)
+                self._pipe(client, upstream)
+                return
+
+            lines = header.split(b"\r\n")
+            outLines = [lines[0]]
+            if self.authHeader:
+                outLines.append(f"Proxy-Authorization: {self.authHeader}".encode())
+            for line in lines[1:]:
+                lower = line.lower()
+                if lower.startswith(b"proxy-authorization:") or lower.startswith(b"proxy-connection:"):
+                    continue
+                outLines.append(line)
+            upstream.sendall(b"\r\n".join(outLines) + b"\r\n\r\n" + rest)
+            self._pipe(client, upstream)
+        except Exception:
+            pass
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+            if upstream is not None:
+                try:
+                    upstream.close()
+                except Exception:
+                    pass
+
+    def _pipe(self, left, right):
+        sockets = [left, right]
+        while True:
+            readable, _, broken = select.select(sockets, [], sockets, 60)
+            if broken or not readable:
+                return
+            for sock in readable:
+                other = right if sock is left else left
+                data = sock.recv(16384)
+                if not data:
+                    return
+                other.sendall(data)
+
 # ── 异常类 ──────────────────────────────────────────────
 class StepError(Exception):
     """可重试的步骤错误"""
@@ -146,6 +269,18 @@ class SignupBot:
     def __init__(self, email=""):
         self.d = None
         self.requested_email = str(email or "").strip()
+        self.localProxy = None
+
+    def resolve_chrome_proxy(self):
+        proxy = str(PROXY or "").strip()
+        if not proxy:
+            return ""
+        parsed = urlparse(proxy if "://" in proxy else f"http://{proxy}")
+        if parsed.username is None:
+            return proxy if "://" in proxy else f"http://{proxy}"
+        self.localProxy = LocalAuthProxy(proxy if "://" in proxy else f"http://{proxy}")
+        log(f"  localProxy={self.localProxy.chromeProxy} -> {parsed.hostname}:{parsed.port}")
+        return self.localProxy.chromeProxy
 
     def launch(self):
         os.environ["DISPLAY"] = DISPLAY
@@ -153,8 +288,10 @@ class SignupBot:
         opts.binary_location = CHROME_BINARY
         args = ["--no-sandbox","--disable-dev-shm-usage","--disable-gpu",
                 "--lang=zh-CN","--window-size=1440,900"]
-        if PROXY:
-            args.append(f"--proxy-server={PROXY}")
+        chromeProxy = self.resolve_chrome_proxy()
+        if chromeProxy:
+            args.append(f"--proxy-server={chromeProxy}")
+            log(f"  chromeProxy={chromeProxy}")
         for a in args:
             opts.add_argument(a)
         chromeKwargs = {
@@ -398,6 +535,10 @@ class SignupBot:
             try: self.d.quit()
             except: pass
             self.d = None
+        if self.localProxy:
+            try: self.localProxy.close()
+            except: pass
+            self.localProxy = None
 
     def cancel_phone(self, phone, reason=""):
         if not phone:
