@@ -60,8 +60,15 @@ def detect_chrome_version(binary):
         pass
     return 149
 
+def detect_chromedriver_binary():
+    configured = os.getenv("UC_SIGNUP_CHROMEDRIVER", os.getenv("CHROMEDRIVER_PATH", "")).strip()
+    if configured:
+        return configured
+    return shutil.which("chromedriver") or ""
+
 CHROME_BINARY = detect_chrome_binary()
 CHROME_VERSION = detect_chrome_version(CHROME_BINARY)
+CHROMEDRIVER_BINARY = detect_chromedriver_binary()
 
 # ── 工具函数 ────────────────────────────────────────────
 def log(msg, level="info"):
@@ -113,6 +120,7 @@ TARGET_URL = os.getenv("UC_SIGNUP_TARGET_URL", TARGET_URL).strip()
 MOCK_MODE = os.getenv("UC_SIGNUP_MOCK_MODE", "false").strip().lower() in {"1", "true", "yes", "on"}
 CHROME_BINARY = detect_chrome_binary()
 CHROME_VERSION = detect_chrome_version(CHROME_BINARY)
+CHROMEDRIVER_BINARY = detect_chromedriver_binary()
 
 # ── 异常类 ──────────────────────────────────────────────
 class StepError(Exception):
@@ -149,7 +157,17 @@ class SignupBot:
             args.append(f"--proxy-server={PROXY}")
         for a in args:
             opts.add_argument(a)
-        self.d = uc.Chrome(options=opts, version_main=CHROME_VERSION)
+        chromeKwargs = {
+            "options": opts,
+            "version_main": CHROME_VERSION,
+            "browser_executable_path": CHROME_BINARY,
+        }
+        if CHROMEDRIVER_BINARY:
+            chromeKwargs["driver_executable_path"] = CHROMEDRIVER_BINARY
+            log(f"  chromedriver={CHROMEDRIVER_BINARY}")
+        else:
+            log("  chromedriver=auto-download (may fail on aarch64)", "warn")
+        self.d = uc.Chrome(**chromeKwargs)
         log(f"  webdriver={self.d.execute_script('return navigator.webdriver')}")
 
     # ── 页面等待 ────────────────────────────────────────
