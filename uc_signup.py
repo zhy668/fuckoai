@@ -829,6 +829,18 @@ class SignupBot:
 
         self._step("姓名年龄", _fill)
         time.sleep(8)
+        if self.is_error_page():
+            log("  资料提交后出现错误页，尝试刷新恢复", "warn")
+            try:
+                self.d.refresh()
+                time.sleep(6)
+            except Exception:
+                pass
+            if self.has_profile_inputs():
+                self._step("姓名年龄重试", _fill)
+                time.sleep(8)
+        if self.is_error_page():
+            raise FatalError(f"资料提交后仍错误页: title={self.d.title} url={self.d.current_url[:180]}")
         log(f"✅ 注册完成: {self.d.title}")
 
     def purchase_phone(self):
@@ -1105,7 +1117,7 @@ class SignupBot:
 
             # 统一推进：邮箱OTP / 强制手机 / 授权同意 / 回调
             log("推进 OAuth 授权门禁...")
-            callback_url = self.progress_oauth_until_callback(email)
+            callback_url = self.progress_oauth_until_callback(email, oauthUrl=oa_url)
             phone = self.phone or phone
             full_phone = self.fullPhone or full_phone
 
@@ -1174,17 +1186,28 @@ class SignupBot:
         time.sleep(3)
         return True
 
-    def progress_oauth_until_callback(self, email, maxRounds=24):
+    def progress_oauth_until_callback(self, email, oauthUrl="", maxRounds=24):
         """Advance OAuth gates until localhost callback appears."""
         for roundIdx in range(1, maxRounds + 1):
             self.wait_ready(timeout=2)
             url = self.d.current_url
             titleLower = str(self.d.title or "").lower()
             urlLower = url.lower()
+            textLower = self.page_text().lower()
 
             if "localhost:1455" in url or ("code=" in url and "state=" in url):
                 log(f"  ✅ 回调: {url[:120]}")
                 return url
+
+            if self.is_error_page() or "oops" in titleLower or "unexpected token" in textLower:
+                log(f"  OAuth 错误页，重试授权入口 ({roundIdx})", "warn")
+                if oauthUrl:
+                    self.d.get(oauthUrl)
+                    time.sleep(8)
+                else:
+                    self.d.refresh()
+                    time.sleep(6)
+                continue
 
             if "choose-an-account" in urlLower:
                 log(f"  OAuth 选账户 ({roundIdx})")
@@ -1204,6 +1227,16 @@ class SignupBot:
                 time.sleep(3)
                 continue
 
+            # Login email page without password yet
+            if "log-in" in urlLower and self.d.find_elements(
+                By.CSS_SELECTOR, "input[type=email], input[name=email], input[name=username]"
+            ):
+                log(f"  OAuth 补填邮箱 ({roundIdx})")
+                self.fill_any(["input[type=email]", "input[name=email]", "input[name=username]"], email)
+                self.click("Continue")
+                time.sleep(4)
+                continue
+
             if self.looks_like_email_otp() or self.has_code_input():
                 # Avoid blind Continue on OTP pages.
                 time.sleep(2)
@@ -1213,6 +1246,12 @@ class SignupBot:
                 log(f"授权页: {self.d.title}")
                 self.click_optional("Continue", wait_seconds=4)
                 time.sleep(2)
+                continue
+
+            if self._find_button("Try again"):
+                log(f"  点击 Try again ({roundIdx})", "warn")
+                self.click_optional("Try again", wait_seconds=3)
+                time.sleep(3)
                 continue
 
             time.sleep(2)
