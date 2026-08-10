@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
@@ -415,8 +416,15 @@ class SignupBot:
             btn = self._find_button(text)
             if btn:
                 try:
-                    log(f"  点击: {btn.text.strip()[:50]}")
-                    ActionChains(self.d).move_to_element(btn).click().perform()
+                    label = (btn.text or text or "").strip()[:50] or text
+                    log(f"  点击: {label}")
+                    try:
+                        ActionChains(self.d).move_to_element(btn).click().perform()
+                    except Exception:
+                        try:
+                            btn.click()
+                        except Exception:
+                            self.d.execute_script("arguments[0].click();", btn)
                     time.sleep(3)
                     return
                 except Exception as e:
@@ -557,9 +565,51 @@ class SignupBot:
             log(f"  取消手机号失败 {phone}: {e}", "warn")
             return False
 
-    def wait_after_email_submit(self, timeout=45):
+    def is_signup_landing(self):
+        textLower = self.page_text().lower()
+        titleLower = str(self.d.title or "").lower()
+        hasEmail = bool(
+            self.d.find_elements(
+                By.CSS_SELECTOR,
+                "input[type=email], input[name=email], input[autocomplete=email], input[name=username]",
+            )
+        )
+        looksLikeLanding = (
+            "log in or sign up" in textLower
+            or "get started" in titleLower
+            or ("continue with google" in textLower and "continue with phone" in textLower)
+        )
+        return hasEmail and looksLikeLanding
+
+    def is_continue_loading(self):
+        """Detect Continue button stuck in spinner/loading state after email submit."""
+        try:
+            return bool(
+                self.d.execute_script(
+                    """
+                    const isOauth = (t) => /^continue with\\b/i.test(t || '');
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    for (const b of buttons) {
+                      const t = (b.innerText || b.textContent || '').trim();
+                      if (isOauth(t)) continue;
+                      const busy = (b.getAttribute('aria-busy') || '').toLowerCase() === 'true';
+                      const disabled = !!(b.disabled || (b.getAttribute('aria-disabled') || '').toLowerCase() === 'true');
+                      const hasSvg = !!b.querySelector('svg, [class*=\"spinner\" i], [class*=\"loading\" i], [role=\"progressbar\"]');
+                      const looksContinue = !t || /^continue$/i.test(t) || hasSvg;
+                      if (looksContinue && (busy || (disabled && hasSvg) || (hasSvg && !t))) return true;
+                    }
+                    return false;
+                    """
+                )
+            )
+        except Exception:
+            return False
+
+    def wait_after_email_submit(self, timeout=60):
         deadline = time.time() + timeout
         last_url = ""
+        sawLoading = False
+        loadingStartedAt = None
         while time.time() < deadline:
             self.wait_ready(timeout=2)
             last_url = self.d.current_url
@@ -580,7 +630,32 @@ class SignupBot:
                 return "email-code"
             if self.needs_phone_verification():
                 return "phone"
+
+            loading = self.is_continue_loading()
+            if loading:
+                if not sawLoading:
+                    log("  Continue 提交中（加载中）...")
+                    loadingStartedAt = time.time()
+                sawLoading = True
+                # Hang protection: spinner longer than 35s on landing is almost always proxy/auth stall.
+                if self.is_signup_landing() and loadingStartedAt and (time.time() - loadingStartedAt) >= 35:
+                    raise FatalError(
+                        f"邮箱提交卡住: Continue 一直加载 url={last_url[:180]} title={self.d.title}"
+                    )
+            elif sawLoading and self.is_signup_landing():
+                # Loading ended but still on landing — likely soft failure; keep waiting a bit.
+                pass
+
+            if any(k in textLower for k in ("failed to create account", "something went wrong", "too many requests")):
+                raise FatalError(
+                    f"邮箱提交被拒绝: url={last_url[:180]} title={self.d.title} text={textLower[:220]}"
+                )
             time.sleep(1)
+
+        if sawLoading and self.is_signup_landing():
+            raise FatalError(
+                f"邮箱提交卡住: Continue 超时仍停在登录页 url={last_url[:180]} title={self.d.title}"
+            )
         raise FatalError(
             f"邮箱提交后页面未知: url={last_url[:180]} title={self.d.title} text={self.page_text()[:220]}"
         )
@@ -633,6 +708,20 @@ class SignupBot:
             k in textLower for k in ("text message", "sent a code to +", "sms", "手机验证码")
         )
 
+    def find_email_input(self):
+        selectors = [
+            "input[type=email]",
+            "input[name=email]",
+            "input[autocomplete=email]",
+            "input[id=email]",
+            "input[name=username]",
+        ]
+        for sel in selectors:
+            els = self.d.find_elements(By.CSS_SELECTOR, sel)
+            if els:
+                return els[0]
+        return None
+
     def enter_email_and_continue(self, email):
         selectors = [
             "input[type=email]",
@@ -651,9 +740,44 @@ class SignupBot:
                 continue
         if not filled:
             self.fill_any(selectors, email)
+
+        emailEl = self.find_email_input()
+        if emailEl is not None:
+            try:
+                self.d.execute_script(
+                    """
+                    const el = arguments[0];
+                    const value = arguments[1];
+                    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+                    if (setter) setter.call(el, value);
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    """,
+                    emailEl,
+                    email,
+                )
+            except Exception:
+                pass
+
         # Prefer plain Continue; never click Continue with phone here.
         self.click("Continue")
-        time.sleep(4)
+        time.sleep(2)
+        if self.is_signup_landing() and not self.is_continue_loading() and emailEl is not None:
+            log("  Continue 未进入加载，改用 Enter 提交", "warn")
+            try:
+                emailEl.send_keys(Keys.ENTER)
+                time.sleep(2)
+            except Exception as e:
+                log(f"  Enter 提交失败: {e}", "warn")
+        if self.is_signup_landing() and not self.is_continue_loading():
+            btn = self._find_button("Continue")
+            if btn is not None:
+                log("  Continue 仍未加载，改用 JS click", "warn")
+                try:
+                    self.d.execute_script("arguments[0].click();", btn)
+                    time.sleep(2)
+                except Exception as e:
+                    log(f"  JS click 失败: {e}", "warn")
 
     def fill_profile(self):
         def _fill():
@@ -757,9 +881,29 @@ class SignupBot:
         log(f"注册: {self.d.title}")
 
         self._step("Cookie", lambda: self.click_optional("Accept all"))
-        self._step("填邮箱", lambda: self.enter_email_and_continue(email))
 
-        stage = self.wait_after_email_submit()
+        stage = None
+        lastSubmitError = None
+        for attempt in range(1, 4):
+            try:
+                if attempt > 1:
+                    log(f"  邮箱提交重试 {attempt}/3：重新打开注册页", "warn")
+                    self.d.get(TARGET_URL)
+                    time.sleep(10)
+                    self.click_optional("Accept all")
+                self._step("填邮箱", lambda: self.enter_email_and_continue(email))
+                stage = self.wait_after_email_submit()
+                break
+            except FatalError as e:
+                lastSubmitError = e
+                msg = str(e)
+                retryable = ("邮箱提交卡住" in msg) or ("邮箱提交后页面未知" in msg)
+                if not retryable or attempt >= 3:
+                    raise
+                log(f"  {msg}", "warn")
+        if stage is None:
+            raise lastSubmitError or FatalError("邮箱提交失败")
+
         log(f"→ 邮箱后阶段: {stage} | {self.d.title}")
         if stage == "email-code":
             self.submit_verification_code(email)
