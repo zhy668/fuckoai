@@ -33,7 +33,8 @@ PURCHASE_CONFIG_PATH = ROOT / "data/purchase_config.json"
 CONTROL_PANEL_PATH = ROOT / "control_panel.html"
 EMAIL_QUEUE_PATH = ROOT / "data/email_queue.json"
 CATALOG_CACHE_PATH = ROOT / "data/catalog_cache.json"
-DEFAULT_SIGNUP_TARGET_URL = "http://127.0.0.1:8088/auth/login?intent=signup"
+SIGNUP_URL = "https://chatgpt.com/auth/login?intent=signup"
+DEFAULT_SIGNUP_TARGET_URL = SIGNUP_URL
 DEFAULT_SERVICE_NAME = "OpenAI"
 DEFAULT_SERVICE_CODE = "dr"
 PURCHASE_FILTER_KEYS = (
@@ -100,7 +101,7 @@ DEFAULT_APP_SETTINGS: dict[str, Any] = {
     "SIGNUP_NAME": "Fuck OAI",
     "SIGNUP_AGE": "18",
     "SIGNUP_TARGET_URL": DEFAULT_SIGNUP_TARGET_URL,
-    "SIGNUP_MOCK_MODE": "true",
+    "SIGNUP_MOCK_MODE": "false",
     "BROWSER_DISPLAY": ":1",
     "BROWSER_PROXY": "",
     "UC_SIGNUP_PROXY": "",
@@ -288,7 +289,7 @@ class Config:
     signup_name: str = app_config_value("SIGNUP_NAME", "Fuck OAI")
     signup_age: str = app_config_value("SIGNUP_AGE", "18")
     signup_target_url: str = app_config_value("SIGNUP_TARGET_URL", DEFAULT_SIGNUP_TARGET_URL)
-    signup_mock_mode: bool = parse_bool_flag(app_config_value("SIGNUP_MOCK_MODE", "true"), default=True)
+    signup_mock_mode: bool = parse_bool_flag(app_config_value("SIGNUP_MOCK_MODE", "false"), default=False)
     admin_password: str = os.getenv("ADMIN_PASSWORD", "")
 
     def __post_init__(self) -> None:
@@ -323,7 +324,7 @@ class Config:
         self.signup_name = app_config_value("SIGNUP_NAME", "Fuck OAI")
         self.signup_age = app_config_value("SIGNUP_AGE", "18")
         self.signup_target_url = app_config_value("SIGNUP_TARGET_URL", DEFAULT_SIGNUP_TARGET_URL).strip() or DEFAULT_SIGNUP_TARGET_URL
-        self.signup_mock_mode = parse_bool_flag(app_config_value("SIGNUP_MOCK_MODE", "true"), default=True)
+        self.signup_mock_mode = parse_bool_flag(app_config_value("SIGNUP_MOCK_MODE", "false"), default=False)
         self.admin_password = os.getenv("ADMIN_PASSWORD", "")
 
 
@@ -1409,7 +1410,7 @@ def reload_runtime_config() -> None:
     CONFIG.signup_name = app_config_value("SIGNUP_NAME", "Fuck OAI")
     CONFIG.signup_age = app_config_value("SIGNUP_AGE", "18")
     CONFIG.signup_target_url = app_config_value("SIGNUP_TARGET_URL", DEFAULT_SIGNUP_TARGET_URL).strip() or DEFAULT_SIGNUP_TARGET_URL
-    CONFIG.signup_mock_mode = parse_bool_flag(app_config_value("SIGNUP_MOCK_MODE", "true"), default=True)
+    CONFIG.signup_mock_mode = parse_bool_flag(app_config_value("SIGNUP_MOCK_MODE", "false"), default=False)
     CONFIG.admin_password = os.getenv("ADMIN_PASSWORD", "")
 
     CLIENT = HeroSmsClient(CONFIG.api_key, CONFIG.api_url, CONFIG.timeout_ms)
