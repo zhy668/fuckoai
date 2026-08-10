@@ -7,6 +7,7 @@ import argparse, json, os, re, shutil, signal, subprocess, sys, time
 from datetime import datetime
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 import undetected_chromedriver as uc
@@ -31,6 +32,8 @@ PW   = os.getenv("SIGNUP_PASSWORD", "ChangeMe123456!")
 NAME = os.getenv("SIGNUP_NAME", "Test User")
 AGE  = os.getenv("SIGNUP_AGE", "18")
 DISPLAY = os.getenv("UC_SIGNUP_DISPLAY", os.getenv("BROWSER_DISPLAY", ":1"))
+TARGET_URL = os.getenv("UC_SIGNUP_TARGET_URL", "http://127.0.0.1:8088/auth/login?intent=signup").strip()
+MOCK_MODE = os.getenv("UC_SIGNUP_MOCK_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
 def detect_chrome_binary():
     configured = os.getenv("UC_SIGNUP_CHROME_BINARY", os.getenv("CHROME_BINARY", "")).strip()
     if configured:
@@ -106,6 +109,8 @@ PW = os.getenv("SIGNUP_PASSWORD", PW)
 NAME = os.getenv("SIGNUP_NAME", NAME)
 AGE = os.getenv("SIGNUP_AGE", AGE)
 DISPLAY = os.getenv("UC_SIGNUP_DISPLAY", os.getenv("BROWSER_DISPLAY", DISPLAY))
+TARGET_URL = os.getenv("UC_SIGNUP_TARGET_URL", TARGET_URL).strip()
+MOCK_MODE = os.getenv("UC_SIGNUP_MOCK_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
 CHROME_BINARY = detect_chrome_binary()
 CHROME_VERSION = detect_chrome_version(CHROME_BINARY)
 
@@ -121,6 +126,11 @@ class FatalError(Exception):
 class ApiError(Exception):
     """内部 API 调用失败"""
     pass
+
+def ensure_local_target(url):
+    parsed = urlparse(str(url or ""))
+    if parsed.scheme not in {"http", "https"} or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        raise FatalError("注册目标必须是本机 Mock 地址，仅允许 127.0.0.1、localhost 或 ::1")
 
 class PhoneRetry(Exception):
     """当前手机号不可用，需要同一邮箱换号重试"""
@@ -292,7 +302,7 @@ class SignupBot:
     def poll_email(self, addr):
         for i in range(15):
             try:
-                r = api("GET", f"/api/email-queue/mail/latest?address={addr}")
+                r = api("GET", f"/api/gmail/mail/latest?address={quote(str(addr), safe='')}")
                 item = r.get("item", {}) or r.get("mail", {})
                 txt = str(item.get("decodedText","")) + " " + str(item.get("decodedSubject",""))
                 m = re.search(r'\b(\d{6})\b', txt)
@@ -305,21 +315,9 @@ class SignupBot:
 
     def prepare_email(self):
         if not self.requested_email:
-            return api("POST", "/api/temp-mail/address", {}).get("item", {}).get("address", "")
-
+            raise FatalError("未提供邮箱地址；Temp Mail 已移除，请先导入邮箱列表")
         if "@" not in self.requested_email:
             raise FatalError(f"邮箱格式无效: {self.requested_email}")
-
-        name, domain = self.requested_email.split("@", 1)
-        try:
-            api("POST", "/api/temp-mail/address", {
-                "name": name,
-                "domain": domain,
-                "enablePrefix": False,
-            })
-            log(f"  邮箱已创建/确认: {self.requested_email}")
-        except Exception as e:
-            log(f"  邮箱创建确认失败，继续使用传入邮箱: {e}", "warn")
         return self.requested_email
 
     def close_browser(self):
@@ -366,7 +364,7 @@ class SignupBot:
 
         self.launch()
 
-        self.d.get("https://chatgpt.com/auth/login?intent=signup")
+        self.d.get(TARGET_URL)
         time.sleep(12)
         log(f"注册: {self.d.title}")
 
@@ -433,6 +431,15 @@ class SignupBot:
                 raise
         raise FatalError(f"步骤 [{name}] 失败，已重试{MAX_RETRIES}次")
 
+    def run_mock(self):
+        email = self.prepare_email()
+        log(f"本地 Mock 目标: {TARGET_URL}")
+        code = self.poll_email(email)
+        if not code:
+            raise FatalError("Gmail 邮件码超时")
+        log("✅ Gmail 邮件轮询成功（Mock 模式，不提交验证码、不创建账号）")
+        return True
+
     # ── 主流程 ───────────────────────────────────────────
     def run(self):
         log("=" * 55)
@@ -442,6 +449,9 @@ class SignupBot:
         phone = email = full_phone = ""
         completed_success = False
         try:
+            ensure_local_target(TARGET_URL)
+            if MOCK_MODE:
+                return self.run_mock()
             # ═══ 准备 ═══
             email = self.prepare_email()
             last_phone_error = ""

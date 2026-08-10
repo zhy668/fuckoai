@@ -6,7 +6,7 @@ Linux 容器版注册控制面板。
 
 - Web 控制面板：`/ui`
 - 邮箱列表导入与 Gmail IMAP 收件
-- 购买组可视化配置，保存到本地 `data/purchase_config.json`
+- 本地 Mock 注册任务目标，默认指向 `http://127.0.0.1:8088`，不会访问真实注册站点- 购买组可视化配置，保存到本地 `data/purchase_config.json`
 - Linux 图形浏览器自动注册入口，通过 Xvfb、x11vnc、noVNC 查看
 
 ## 文件结构
@@ -49,7 +49,14 @@ ADMIN_PASSWORD=你的控制面板管理员密码
 GMAIL_APP_PASSWORD=abcdefghijklmnop
 ```
 
-并在控制面板“应用配置”中填写 `GMAIL_USERNAME`（完整 Gmail 地址）。默认通过 `imap.gmail.com:993` + SSL 读取 `INBOX`。
+并在控制面板“应用配置”中确认：
+
+```text
+SIGNUP_TARGET_URL=http://127.0.0.1:8088/auth/login?intent=signup
+SIGNUP_MOCK_MODE=true
+```
+
+Mock 模式只进行本地目标配置和 Gmail 邮件轮询，不购买号码、不访问真实外部注册站点。
 
 
 ## 购买配置
