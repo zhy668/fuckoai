@@ -382,7 +382,10 @@
               <button id="generateEmailQueueBtn">生成列表</button>
               <button id="saveEmailQueueBtn">保存列表</button>
               <button id="loadEmailQueueBtn">重新加载</button>
+              <button id="importEmailListBtn">导入 TXT/CSV</button>
+              <input id="emailListFile" type="file" accept=".txt,.csv,text/plain,text/csv" hidden>
               <button id="mailCodeBtn">查邮箱验证码</button>
+              <button id="gmailMailBtn">从 Gmail 查邮件</button>
             </div>
             <p id="emailQueueState" class="muted">--</p>
           </section>
@@ -402,15 +405,18 @@
             <div class="metric"><b>API</b><span id="apiState">--</span></div>
             <div class="metric"><b>HeroSMS</b><span id="heroState">--</span></div>
             <div class="metric"><b>Temp Mail</b><span id="mailState">--</span></div>
+            <div class="metric"><b>Gmail IMAP</b><span id="gmailState">--</span></div>
             <div class="metric"><b>CPA/OAuth</b><span id="cpaState">--</span></div>
           </div>
         </section>
         <section>
           <h3>应用配置</h3>
           <div id="appSettingsGrid" class="settings-grid"></div>
+          <p class="muted">Gmail 应用专用密码不会保存到 config.json。请将它放到服务端环境变量 <code>GMAIL_APP_PASSWORD</code>，然后用下面的按钮测试 IMAP 连接。</p>
           <div class="row">
             <button id="loadAppSettingsBtn">重新加载</button>
             <button id="saveAppSettingsBtn" class="primary">保存应用配置</button>
+            <button id="testGmailBtn">测试 Gmail IMAP</button>
           </div>
         </section>
         <section>
@@ -472,6 +478,8 @@
       "HOST", "PORT",
       "HERO_SMS_API_KEY", "HERO_SMS_API_URL",
       "TEMP_MAIL_API_URL", "TEMP_MAIL_ADMIN_PASSWORD",
+      "GMAIL_IMAP_HOST", "GMAIL_IMAP_PORT", "GMAIL_USERNAME", "GMAIL_FOLDER",
+      "GMAIL_UNSEEN_ONLY", "GMAIL_MARK_SEEN", "GMAIL_SEARCH_LIMIT",
       "CPA_BASE_URL", "CPA_MANAGEMENT_KEY",
       "SIGNUP_PASSWORD", "SIGNUP_NAME", "SIGNUP_AGE",
       "BROWSER_DISPLAY", "BROWSER_PROXY", "UC_SIGNUP_PROXY",
@@ -487,6 +495,13 @@
       HERO_SMS_API_URL: "HeroSMS 接口地址",
       TEMP_MAIL_API_URL: "临时邮箱接口地址",
       TEMP_MAIL_ADMIN_PASSWORD: "临时邮箱管理员密码",
+      GMAIL_IMAP_HOST: "Gmail IMAP 主机",
+      GMAIL_IMAP_PORT: "Gmail IMAP SSL 端口",
+      GMAIL_USERNAME: "Gmail 收件账号",
+      GMAIL_FOLDER: "Gmail 文件夹",
+      GMAIL_UNSEEN_ONLY: "只搜索未读邮件",
+      GMAIL_MARK_SEEN: "读取后标记为已读",
+      GMAIL_SEARCH_LIMIT: "Gmail 最近搜索数量",
       CPA_BASE_URL: "CPA / OAuth 服务地址",
       CPA_MANAGEMENT_KEY: "CPA 管理密钥",
       SIGNUP_PASSWORD: "注册账号默认密码",
@@ -651,6 +666,7 @@
       setState("apiState", health.ok, health.ok ? "运行中" : "异常");
       setState("heroState", health.configured, health.configured ? "已配置" : "未配置");
       setState("mailState", health.tempMailConfigured, health.tempMailConfigured ? "已配置" : "未配置");
+      setState("gmailState", health.gmailConfigured, health.gmailConfigured ? "已配置" : "未配置");
       setState("cpaState", health.cpaConfigured, health.cpaConfigured ? "已配置" : "未配置");
       return health;
     }
@@ -1089,12 +1105,50 @@
       log("邮箱列表已保存");
     }
 
+    async function importEmailList() {
+      const file = $("emailListFile").files[0];
+      if (!file) throw new Error("请先选择 TXT 或 CSV 文件");
+      const text = await file.text();
+      const imported = [];
+      for (const line of text.split(/\r?\n/)) {
+        const matches = line.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/ig) || [];
+        imported.push(...matches.map((item) => item.trim()));
+      }
+      const merged = [];
+      const seen = new Set();
+      for (const item of [$("emailQueueText").value, imported.join("\n")].join("\n").split(/\r?\n/)) {
+        const email = item.trim();
+        if (email && !seen.has(email.toLowerCase())) {
+          seen.add(email.toLowerCase());
+          merged.push(email);
+        }
+      }
+      if (!merged.length) throw new Error("文件中没有识别到邮箱地址");
+      $("emailQueueText").value = merged.join("\n");
+      updateEmailQueueUI({ emails: merged, cursor: 0, activeEmail: merged[0] });
+      log(`已导入 ${imported.length} 个邮箱；请点击“保存列表”写入队列`);
+      $("emailListFile").value = "";
+    }
+
     async function refreshEmailCode() {
       const email = $("emailCurrent").value.trim();
       const url = email ? `/api/email-queue/mail/latest?address=${encodeURIComponent(email)}` : "/api/email-queue/mail/latest";
       const payload = await requestJSON("GET", url);
       updateEmailQueueUI(payload.emailQueue || {});
       log(payload);
+    }
+
+    async function refreshGmailMail() {
+      const email = $("emailCurrent").value.trim();
+      const url = email ? `/api/gmail/mail/latest?address=${encodeURIComponent(email)}` : "/api/gmail/mail/latest";
+      const payload = await requestJSON("GET", url);
+      updateEmailQueueUI(payload.emailQueue || {});
+      log({ message: "Gmail 最新转发邮件", result: payload });
+    }
+
+    async function testGmail() {
+      const payload = await requestJSON("POST", "/api/gmail/test", {});
+      log({ message: "Gmail IMAP 连接测试成功", result: payload });
     }
 
     let ucSignupPollTimer = null;
@@ -1215,8 +1269,12 @@
     $("saveEmailQueueBtn").onclick = () => run(saveEmailQueue);
     $("loadEmailQueueBtn").onclick = () => run(loadEmailQueue);
     $("mailCodeBtn").onclick = () => run(refreshEmailCode);
+    $("importEmailListBtn").onclick = () => $("emailListFile").click();
+    $("emailListFile").onchange = () => run(importEmailList);
+    $("gmailMailBtn").onclick = () => run(refreshGmailMail);
     $("loadAppSettingsBtn").onclick = () => run(loadAppSettings);
     $("saveAppSettingsBtn").onclick = () => run(saveAppSettings);
+    $("testGmailBtn").onclick = () => run(testGmail);
     $("ucSignupStartBtn").onclick = () => run(startUcSignup);
     $("ucSignupStopBtn").onclick = () => run(stopUcSignup);
     $("ucSignupRefreshBtn").onclick = () => run(refreshUcSignupStatus);

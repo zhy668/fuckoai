@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import hashlib
 import hmac
+import imaplib
 import os
 import random
+import ssl
 import re
 import signal
 import string
@@ -15,7 +17,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from email import policy
-from email.parser import Parser
+from email.parser import BytesParser, Parser
 from html import unescape as html_unescape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -53,6 +55,13 @@ APP_SETTING_FIELDS = (
     "HERO_SMS_API_URL",
     "TEMP_MAIL_API_URL",
     "TEMP_MAIL_ADMIN_PASSWORD",
+    "GMAIL_IMAP_HOST",
+    "GMAIL_IMAP_PORT",
+    "GMAIL_USERNAME",
+    "GMAIL_FOLDER",
+    "GMAIL_UNSEEN_ONLY",
+    "GMAIL_MARK_SEEN",
+    "GMAIL_SEARCH_LIMIT",
     "CPA_BASE_URL",
     "CPA_MANAGEMENT_KEY",
     "SIGNUP_PASSWORD",
@@ -80,6 +89,13 @@ DEFAULT_APP_SETTINGS: dict[str, Any] = {
     "HERO_SMS_API_URL": "https://hero-sms.com/stubs/handler_api.php",
     "TEMP_MAIL_API_URL": "",
     "TEMP_MAIL_ADMIN_PASSWORD": "",
+    "GMAIL_IMAP_HOST": "imap.gmail.com",
+    "GMAIL_IMAP_PORT": "993",
+    "GMAIL_USERNAME": "",
+    "GMAIL_FOLDER": "INBOX",
+    "GMAIL_UNSEEN_ONLY": "false",
+    "GMAIL_MARK_SEEN": "false",
+    "GMAIL_SEARCH_LIMIT": "20",
     "CPA_BASE_URL": "",
     "CPA_MANAGEMENT_KEY": "",
     "SIGNUP_PASSWORD": "FuckOAI123456!",
@@ -118,7 +134,7 @@ def load_env_file(path: Path, *, allowed_keys: set[str] | None = None) -> None:
             os.environ[key] = value
 
 
-load_env_file(ROOT / ".env", allowed_keys={"ADMIN_PASSWORD"})
+load_env_file(ROOT / ".env", allowed_keys={"ADMIN_PASSWORD", "GMAIL_APP_PASSWORD"})
 
 
 def load_json_file(path: Path) -> dict[str, Any]:
@@ -249,6 +265,14 @@ class Config:
     purchase_config_file: Path = PURCHASE_CONFIG_PATH
     temp_mail_api_url: str = app_config_value("TEMP_MAIL_API_URL", "")
     temp_mail_admin_password: str = app_config_value("TEMP_MAIL_ADMIN_PASSWORD", "")
+    gmail_imap_host: str = app_config_value("GMAIL_IMAP_HOST", "imap.gmail.com")
+    gmail_imap_port: int = int(app_config_value("GMAIL_IMAP_PORT", "993"))
+    gmail_username: str = app_config_value("GMAIL_USERNAME", "")
+    gmail_folder: str = app_config_value("GMAIL_FOLDER", "INBOX")
+    gmail_unseen_only: bool = parse_bool_flag(app_config_value("GMAIL_UNSEEN_ONLY", "false"), default=False)
+    gmail_mark_seen: bool = parse_bool_flag(app_config_value("GMAIL_MARK_SEEN", "false"), default=False)
+    gmail_search_limit: int = int(app_config_value("GMAIL_SEARCH_LIMIT", "20"))
+    gmail_app_password: str = os.getenv("GMAIL_APP_PASSWORD", "").strip()
     cpa_base_url: str = app_config_value("CPA_BASE_URL", "")
     cpa_management_key: str = app_config_value("CPA_MANAGEMENT_KEY", "")
     browser_display: str = app_config_value("BROWSER_DISPLAY", ":1")
@@ -276,6 +300,14 @@ class Config:
         self.purchase_config_file = (ROOT / app_config_value("PURCHASE_CONFIG_FILE", "./data/purchase_config.json")).resolve()
         self.temp_mail_api_url = app_config_value("TEMP_MAIL_API_URL", "").rstrip("/")
         self.temp_mail_admin_password = app_config_value("TEMP_MAIL_ADMIN_PASSWORD", "")
+        self.gmail_imap_host = app_config_value("GMAIL_IMAP_HOST", "imap.gmail.com").strip()
+        self.gmail_imap_port = int(app_config_value("GMAIL_IMAP_PORT", "993"))
+        self.gmail_username = app_config_value("GMAIL_USERNAME", "").strip()
+        self.gmail_folder = app_config_value("GMAIL_FOLDER", "INBOX").strip() or "INBOX"
+        self.gmail_unseen_only = parse_bool_flag(app_config_value("GMAIL_UNSEEN_ONLY", "false"), default=False)
+        self.gmail_mark_seen = parse_bool_flag(app_config_value("GMAIL_MARK_SEEN", "false"), default=False)
+        self.gmail_search_limit = max(1, int(app_config_value("GMAIL_SEARCH_LIMIT", "20")))
+        self.gmail_app_password = os.getenv("GMAIL_APP_PASSWORD", "").strip()
         self.cpa_base_url = app_config_value("CPA_BASE_URL", "").rstrip("/")
         self.cpa_management_key = app_config_value("CPA_MANAGEMENT_KEY", "")
         self.browser_display = app_config_value("BROWSER_DISPLAY", ":1")
@@ -603,6 +635,10 @@ class PurchaseError(HeroSmsError):
 
 
 class TempMailError(Exception):
+    pass
+
+
+class GmailError(Exception):
     pass
 
 
@@ -1069,6 +1105,155 @@ class TempMailClient:
         return {"success": str(payload).lower() == "true", "raw": payload}
 
 
+class GmailClient:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        username: str,
+        app_password: str,
+        folder: str,
+        unseen_only: bool,
+        mark_seen: bool,
+        search_limit: int,
+        timeout_ms: int,
+    ) -> None:
+        self.host = host or "imap.gmail.com"
+        self.port = int(port or 993)
+        self.username = username.strip()
+        self.app_password = re.sub(r"\s+", "", str(app_password or ""))
+        self.folder = folder.strip() or "INBOX"
+        self.unseen_only = bool(unseen_only)
+        self.mark_seen = bool(mark_seen)
+        self.search_limit = max(1, int(search_limit or 20))
+        self.timeout_seconds = max(1, timeout_ms / 1000)
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.username and self.app_password)
+
+    def settings_summary(self) -> dict[str, Any]:
+        return {
+            "configured": self.configured,
+            "host": self.host,
+            "port": self.port,
+            "username": self.username,
+            "folder": self.folder,
+            "unseenOnly": self.unseen_only,
+            "markSeen": self.mark_seen,
+            "searchLimit": self.search_limit,
+        }
+
+    def _connect(self) -> imaplib.IMAP4_SSL:
+        if not self.username:
+            raise GmailError("未配置 GMAIL_USERNAME")
+        if not self.app_password:
+            raise GmailError("未配置 GMAIL_APP_PASSWORD，请通过环境变量提供 Gmail 应用专用密码")
+        mailbox: imaplib.IMAP4_SSL | None = None
+        try:
+            context = ssl.create_default_context()
+            mailbox = imaplib.IMAP4_SSL(
+                self.host,
+                self.port,
+                ssl_context=context,
+                timeout=self.timeout_seconds,
+            )
+            status, _ = mailbox.login(self.username, self.app_password)
+            if status != "OK":
+                raise GmailError(f"Gmail IMAP 登录失败: {status}")
+            status, _ = mailbox.select(self.folder, readonly=not self.mark_seen)
+            if status != "OK":
+                raise GmailError(f"无法打开 Gmail 文件夹: {self.folder}")
+            return mailbox
+        except GmailError:
+            if mailbox is not None:
+                try:
+                    mailbox.logout()
+                except Exception:
+                    pass
+            raise
+        except (imaplib.IMAP4.error, OSError) as error:
+            if mailbox is not None:
+                try:
+                    mailbox.logout()
+                except Exception:
+                    pass
+            raise GmailError(f"Gmail IMAP 连接失败: {error}") from error
+
+    @staticmethod
+    def _close(mailbox: imaplib.IMAP4_SSL | None) -> None:
+        if mailbox is None:
+            return
+        try:
+            mailbox.close()
+        except Exception:
+            pass
+        try:
+            mailbox.logout()
+        except Exception:
+            pass
+
+    def _fetch_item(self, mailbox: imaplib.IMAP4_SSL, message_id: bytes) -> dict[str, Any] | None:
+        fetch_spec = "(RFC822)" if self.mark_seen else "(BODY.PEEK[])"
+        status, data = mailbox.fetch(message_id, fetch_spec)
+        if status != "OK":
+            return None
+        raw = b""
+        for part in data or []:
+            if isinstance(part, tuple) and len(part) > 1 and isinstance(part[1], bytes):
+                raw = part[1]
+                break
+        if not raw:
+            return None
+        raw_text = raw.decode("utf-8", errors="replace")
+        message = BytesParser(policy=policy.default).parsebytes(raw)
+        decoded = decode_mail_payload(raw_text)
+        return {
+            "id": message_id.decode("ascii", errors="replace"),
+            "messageId": str(message.get("message-id") or "").strip(),
+            "date": str(message.get("date") or "").strip(),
+            "from": str(message.get("from") or "").strip(),
+            "to": str(message.get("to") or "").strip(),
+            "cc": str(message.get("cc") or "").strip(),
+            "subject": decoded.get("subject") or str(message.get("subject") or "").strip(),
+            "decodedText": html_to_text(decoded.get("html") or "") or decoded.get("text") or "",
+            "raw": raw_text,
+        }
+
+    def latest_mail(self, address: str | None = None) -> dict[str, Any] | None:
+        mailbox = self._connect()
+        try:
+            criteria = "UNSEEN" if self.unseen_only else "ALL"
+            status, data = mailbox.search(None, criteria)
+            if status != "OK":
+                raise GmailError(f"Gmail 搜索邮件失败: {status}")
+            message_ids = (data[0] if data else b"").split()
+            for message_id in reversed(message_ids[-self.search_limit:]):
+                item = self._fetch_item(mailbox, message_id)
+                if not item:
+                    continue
+                target = str(address or "").strip().lower()
+                searchable = "\n".join(str(value or "") for value in item.values()).lower()
+                if target and target not in searchable:
+                    continue
+                enriched = enrich_temp_mail_item(item) or item
+                enriched.pop("raw", None)
+                enriched["source"] = "gmail"
+                return enriched
+            return None
+        except GmailError:
+            raise
+        except (imaplib.IMAP4.error, OSError) as error:
+            raise GmailError(f"Gmail 读取邮件失败: {error}") from error
+        finally:
+            self._close(mailbox)
+
+    def test_connection(self) -> dict[str, Any]:
+        mailbox = self._connect()
+        self._close(mailbox)
+        return {"ok": True, **self.settings_summary()}
+
+
 class CpaClient:
     def __init__(self, base_url: str, management_key: str, timeout_ms: int) -> None:
         self.base_url = base_url.rstrip("/")
@@ -1150,13 +1335,24 @@ class CpaClient:
 
 CLIENT = HeroSmsClient(CONFIG.api_key, CONFIG.api_url, CONFIG.timeout_ms)
 TEMP_MAIL = TempMailClient(CONFIG.temp_mail_api_url, CONFIG.temp_mail_admin_password, CONFIG.timeout_ms)
+GMAIL = GmailClient(
+    CONFIG.gmail_imap_host,
+    CONFIG.gmail_imap_port,
+    CONFIG.gmail_username,
+    CONFIG.gmail_app_password,
+    CONFIG.gmail_folder,
+    CONFIG.gmail_unseen_only,
+    CONFIG.gmail_mark_seen,
+    CONFIG.gmail_search_limit,
+    CONFIG.timeout_ms,
+)
 CPA = CpaClient(CONFIG.cpa_base_url, CONFIG.cpa_management_key, CONFIG.timeout_ms)
 PURCHASE_GROUP_CURSOR_LOCK = threading.Lock()
 PURCHASE_GROUP_NEXT_INDEX = 0
 
 
 def reload_runtime_config() -> None:
-    global APP_CONFIG_VALUES, CLIENT, TEMP_MAIL, CPA
+    global APP_CONFIG_VALUES, CLIENT, TEMP_MAIL, GMAIL, CPA
 
     APP_CONFIG_VALUES = load_config_values()
     CONFIG.host = app_config_value("HOST", "0.0.0.0")
@@ -1177,6 +1373,25 @@ def reload_runtime_config() -> None:
     CONFIG.purchase_config_file = (ROOT / app_config_value("PURCHASE_CONFIG_FILE", "./data/purchase_config.json")).resolve()
     CONFIG.temp_mail_api_url = app_config_value("TEMP_MAIL_API_URL", "").rstrip("/")
     CONFIG.temp_mail_admin_password = app_config_value("TEMP_MAIL_ADMIN_PASSWORD", "")
+    CONFIG.gmail_imap_host = app_config_value("GMAIL_IMAP_HOST", "imap.gmail.com").strip()
+    CONFIG.gmail_imap_port = int(app_config_value("GMAIL_IMAP_PORT", "993"))
+    CONFIG.gmail_username = app_config_value("GMAIL_USERNAME", "").strip()
+    CONFIG.gmail_folder = app_config_value("GMAIL_FOLDER", "INBOX").strip() or "INBOX"
+    CONFIG.gmail_unseen_only = parse_bool_flag(app_config_value("GMAIL_UNSEEN_ONLY", "false"), default=False)
+    CONFIG.gmail_mark_seen = parse_bool_flag(app_config_value("GMAIL_MARK_SEEN", "false"), default=False)
+    CONFIG.gmail_search_limit = max(1, int(app_config_value("GMAIL_SEARCH_LIMIT", "20")))
+    CONFIG.gmail_app_password = os.getenv("GMAIL_APP_PASSWORD", "").strip()
+    GMAIL = GmailClient(
+        CONFIG.gmail_imap_host,
+        CONFIG.gmail_imap_port,
+        CONFIG.gmail_username,
+        CONFIG.gmail_app_password,
+        CONFIG.gmail_folder,
+        CONFIG.gmail_unseen_only,
+        CONFIG.gmail_mark_seen,
+        CONFIG.gmail_search_limit,
+        CONFIG.timeout_ms,
+    )
     CONFIG.cpa_base_url = app_config_value("CPA_BASE_URL", "").rstrip("/")
     CONFIG.cpa_management_key = app_config_value("CPA_MANAGEMENT_KEY", "")
     CONFIG.browser_display = app_config_value("BROWSER_DISPLAY", ":1")
@@ -1365,6 +1580,15 @@ def refresh_active_email_mail(address: str | None = None) -> dict[str, Any]:
     mail = enrich_temp_mail_item(TEMP_MAIL.latest_mail(email))
     queue = save_email_queue({**queue, "activeEmail": email, "lastMail": mail})
     return {"emailQueue": queue, "address": email, "item": mail}
+
+
+def refresh_gmail_mail(address: str | None = None) -> dict[str, Any]:
+    queue = load_email_queue()
+    email = str(address or queue.get("activeEmail") or "").strip()
+    mail = GMAIL.latest_mail(email or None)
+    if email:
+        queue = save_email_queue({**queue, "activeEmail": email, "lastMail": mail})
+    return {"emailQueue": queue, "address": email, "item": mail, "source": "gmail"}
 
 
 UC_SIGNUP_LOG_MAX_LINES = 200
@@ -2449,6 +2673,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "configured": bool(CONFIG.api_key),
                     "tempMailConfigured": bool(CONFIG.temp_mail_api_url and CONFIG.temp_mail_admin_password),
+                    "gmailConfigured": GMAIL.configured,
                     "cpaConfigured": bool(CONFIG.cpa_base_url and CONFIG.cpa_management_key),
                     "apiUrl": CONFIG.api_url,
                     "purchaseConfigFile": str(CONFIG.purchase_config_file),
@@ -2495,6 +2720,14 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if method == "GET" and path == "/api/email-queue/mail/latest":
             self.send_json(200, refresh_active_email_mail(query.get("address")))
+            return
+
+        if method == "POST" and path == "/api/gmail/test":
+            self.send_json(200, GMAIL.test_connection())
+            return
+
+        if method == "GET" and path == "/api/gmail/mail/latest":
+            self.send_json(200, refresh_gmail_mail(query.get("address")))
             return
 
         if method == "GET" and path == "/api/purchase-settings":
@@ -2997,6 +3230,8 @@ class AppHandler(BaseHTTPRequestHandler):
                         "saveEmailQueue": "POST /api/email-queue",
                         "generateEmailQueue": "POST /api/email-queue/generate",
                         "latestEmailMail": "GET /api/email-queue/mail/latest",
+                        "gmailTest": "POST /api/gmail/test",
+                        "gmailLatestMail": "GET /api/gmail/mail/latest?address=someone@icloud.com",
                         "tempMailSettings": "GET /api/temp-mail/settings",
                         "tempMailCreate": "POST /api/temp-mail/address",
                         "tempMailListMails": "GET /api/temp-mail/address/:address/mails",

@@ -40,7 +40,17 @@ ADMIN_PASSWORD=你的控制面板管理员密码
 cp config.example.json config.json
 ```
 
-模板已包含 HeroSMS 接口地址、注册资料默认值和浏览器参数；接口密钥、临时邮箱、CPA 等用户配置默认为空。
+模板已包含 HeroSMS 接口地址、注册资料默认值、浏览器参数和 Gmail IMAP 非敏感配置；接口密钥、临时邮箱、CPA 等用户配置默认为空。Gmail 应用专用密码不写入 `config.json`，只从环境变量 `GMAIL_APP_PASSWORD` 读取。
+
+Gmail 示例配置：
+
+```env
+ADMIN_PASSWORD=你的控制面板管理员密码
+GMAIL_APP_PASSWORD=abcdefghijklmnop
+```
+
+并在控制面板“应用配置”中填写 `GMAIL_USERNAME`（完整 Gmail 地址）。默认通过 `imap.gmail.com:993` + SSL 读取 `INBOX`。
+
 
 ## 购买配置
 
@@ -81,16 +91,19 @@ python3 server.py
 ./scripts/start_linux_vnc.sh
 ```
 
-## 邮箱队列
+## 邮箱列表导入与 Gmail 收件
 
-控制面板只保留随机前缀模式。填写邮箱后缀域名、数量和可选邮箱前缀后，会生成：
+控制面板支持导入 TXT/CSV 邮箱列表。文件中每行一个地址即可，也支持从 CSV 行中提取邮箱地址；导入后点击“保存列表”。`@icloud.com` 地址可以作为已有邮箱直接导入，系统不会创建 iCloud 邮箱，也不会替你配置 iCloud 转发。
 
-```text
-随机字符@example.com
-自定义前缀随机字符@example.com
-```
+在 iCloud 中把这些地址的邮件转发到同一个 Gmail 后，服务端可以通过 Gmail IMAP 查询最新转发邮件：
 
-生成后的队列仍可手动编辑，一行一个邮箱。
+1. 在 iCloud 侧完成并验证转发规则。
+2. Gmail 账号开启两步验证，创建一个仅用于本服务的应用专用密码。
+3. 在服务端环境变量设置 `GMAIL_APP_PASSWORD`，在控制面板填写 `GMAIL_USERNAME`，保存后点击“测试 Gmail IMAP”。
+4. 在邮箱列表中选择/填写目标 iCloud 地址，点击“从 Gmail 查邮件”。接口会在最近邮件的头部和正文中匹配该地址；如果转发后的邮件没有保留原始 iCloud 地址，无法可靠区分多个地址，此时应使用 Gmail 标签/文件夹或其他明确的转发标记。
+
+应用专用密码只适用于开启两步验证的账号；它不是普通 Gmail 密码，也不是 iCloud 密码。Google 更推荐 OAuth；Google Workspace 还可能受管理员策略限制。不要把应用专用密码提交到 Git 或写进前端页面。
+
 
 ## API
 
@@ -109,6 +122,8 @@ http://127.0.0.1:3030/api
 - `GET /api/email-queue`
 - `POST /api/email-queue`
 - `POST /api/email-queue/generate`
+- `POST /api/gmail/test`
+- `GET /api/gmail/mail/latest?address=someone@icloud.com`
 - `GET /api/uc-signup/status`
 - `POST /api/uc-signup/start`
 - `POST /api/uc-signup/stop`
